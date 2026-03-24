@@ -1144,7 +1144,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </table>
 <p>说明：</p>
 <ul>
-<li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧等效数据增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
+<li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
 <li>解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>
 <li>硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 <code>SYNC_SEARCH</code>。<code>reset_hold_s</code> 决定坏的 delay 条件需要持续多久才会触发这一动作。</li>
 </ul>

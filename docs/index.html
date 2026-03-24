@@ -1156,7 +1156,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 </table>
 <p>Notes:</p>
 <ul>
-<li>RX AGC has two phases. During <code>SYNC_SEARCH</code>, the receiver resets gain to the configured <code>rx_gain</code> and performs a coarse search sweep (+1 dB every 10 frame-equivalents, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered <code>delay_spectrum</code> peak window defined by <code>rx_agc_low_threshold_db</code> and <code>rx_agc_high_threshold_db</code>.</li>
+<li>RX AGC has two phases. During <code>SYNC_SEARCH</code>, the receiver resets gain to the configured <code>rx_gain</code> and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered <code>delay_spectrum</code> peak window defined by <code>rx_agc_low_threshold_db</code> and <code>rx_agc_high_threshold_db</code>.</li>
 <li>Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the demodulator forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.</li>
 <li>A hard reset clears timing/frequency tracking state, flushes pending queues, resets the tracking AGC state, and returns the receiver to <code>SYNC_SEARCH</code>. <code>reset_hold_s</code> controls how long bad delay conditions must persist before this happens.</li>
 </ul>

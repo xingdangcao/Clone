@@ -558,6 +558,6 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | 允许使用的 CPU 核列表。若核心数量有限，应先给主线程保留一个专用核心，其次优先 `rx_proc`，最后再考虑 `process_proc`、`sensing_process_proc` 和 `bit_processing_proc`，因为这些后级处理线程通常有更大的缓冲区，能更好吸收短时调度抖动。 |
 
 说明：
-* RX AGC 分为两个阶段。`SYNC_SEARCH` 阶段会先把增益恢复到配置的 `rx_gain`，然后进行粗搜索扫描（每 10 个帧等效数据增加 `1 dB`，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 `rx_agc_low_threshold_db` / `rx_agc_high_threshold_db` 定义的窗口来细调增益。
+* RX AGC 分为两个阶段。`SYNC_SEARCH` 阶段会先把增益恢复到配置的 `rx_gain`，然后进行粗搜索扫描（每 10 个帧增加 `1 dB`，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 `rx_agc_low_threshold_db` / `rx_agc_high_threshold_db` 定义的窗口来细调增益。
 * 解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。
 * 硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 `SYNC_SEARCH`。`reset_hold_s` 决定坏的 delay 条件需要持续多久才会触发这一动作。
