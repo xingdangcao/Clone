@@ -6,3 +6,4 @@ optuna
 numba
 pyqtgraph>=0.14.0
 PyQt6>=6.0.0
+PyYAML>=6.0

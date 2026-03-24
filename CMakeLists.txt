@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.18)
 project(OFDM_Modulator CXX)
 
 # Set C++ standard
@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find required libraries
 find_package(UHD REQUIRED)
-find_package(Boost 1.66 REQUIRED COMPONENTS system program_options)
+find_package(Boost 1.66 REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)  # Require OpenMP support
 find_package(PkgConfig REQUIRED)
@@ -82,18 +82,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     list(APPEND COMMON_COMPILE_OPTIONS -Wno-unsupported-floating-point-opt)
 endif()
 
+set(OPENISAC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+set(OPENISAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
 #===========================================================
 # Modulator Executable
 #===========================================================
 add_executable(OFDMModulator
-    OFDMModulator.cpp
-    LDPC5041008SIMD.cpp
+    ${OPENISAC_SRC_DIR}/OFDMModulator.cpp
+    ${OPENISAC_SRC_DIR}/SensingChannel.cpp
+    ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
 )
 
 target_include_directories(OFDMModulator PRIVATE
     ${UHD_INCLUDE_DIRS}
     ${LIBDPDK_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
+    ${OPENISAC_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${Boost_INCLUDE_DIRS}
 )
@@ -118,14 +124,17 @@ target_compile_options(OFDMModulator PRIVATE
 # Demodulator Executable
 #===========================================================
 add_executable(OFDMDemodulator
-    OFDMDemodulator.cpp
-    LDPC5041008SIMD.cpp
+    ${OPENISAC_SRC_DIR}/OFDMDemodulator.cpp
+    ${OPENISAC_SRC_DIR}/SensingChannel.cpp
+    ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
 )
 
 target_include_directories(OFDMDemodulator PRIVATE
     ${UHD_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
+    ${OPENISAC_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

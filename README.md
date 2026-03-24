@@ -118,13 +118,13 @@ To support high bandwidth and sample rates, ensure the connection between the Co
  
 #### Dependencies & Installation
  
-##### 1. UHD (USRP Hardware Driver)
+#### 1. UHD (USRP Hardware Driver)
 Install the UHD toolchain by following the official Ettus guide (Please follow the tutorial for Ubuntu 24.04):
 *   [Building and Installing the USRP Open-Source Toolchain on Linux](https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux#Update_and_Install_dependencies)
  
 > **Note:** This code has been tested on UHD v4.9.0.1. You can checkout this version using `git checkout v4.9.0.1`.
  
-##### 2. Install Aff3ct
+#### 2. Install Aff3ct
 This project uses the Aff3ct library for Forward Error Correction (FEC). Install it from source:
  
 ```bash
@@ -139,7 +139,7 @@ make -j$(nproc)
 sudo make install
 ```
  
-##### 3. Clone Repository
+#### 3. Clone Repository
 Clone the OpenISAC repository:
  
 ```bash
@@ -147,7 +147,7 @@ cd ~
 git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 ```
  
-##### 4. Build OpenISAC
+#### 4. Build OpenISAC
 Build the project using CMake:
  
 ```bash
@@ -159,18 +159,16 @@ cmake ..
 make -j$(nproc)
 ```
  
-##### 5. System Performance Tuning
+#### 5. System Performance Tuning
 Run the provided script to optimize your system settings for real-time processing:
  
 ```bash
 cd ~/OpenISAC
-chmod +x set_performance.bash
-./set_performance.bash
+chmod +x scripts/set_performance.bash
+./scripts/set_performance.bash
 ```
  
 > **Note:** `secure_boot` needs to be turned off in your BIOS settings to enable `RT_RUNTIME_SHARE` functionality.
- 
-###### UHD Thread Priority Configuration
  
 When UHD spawns a new thread, it may try to boost the thread's scheduling priority. If setting the new priority fails, the UHD software prints a warning to the console, as shown below.
  
@@ -193,56 +191,73 @@ Then add the line below to end of the file `/etc/security/limits.conf`:
  
 You must log out and log back into the account for the settings to take effect. In most Linux distributions, a list of groups and group members can be found in the `/etc/group` file.
  
-##### 6. CPU Isolation and Execution
-To ensure stable real-time performance, it is recommended to isolate CPU cores for the signal processing tasks. We provide a script `isolate_cpus.bash` to handle this automatically.
- 
-**Step 1: Isolate System Cores**
-This command will restrict system processes to E-Cores (on Intel Hybrid Architecture) or a subset of cores, leaving P-Cores or other CPU cores free for the application.
+#### 6. CPU Isolation and Execution
+To ensure stable real-time performance, use `scripts/isolate_cpus.bash` to constrain system services (`system.slice`, `user.slice`, `init.scope`) to selected CPUs and reserve other CPUs for your workload.
+
+All commands require root privileges (`sudo`):
+
 ```bash
 cd ~/OpenISAC
-chmod +x isolate_cpus.bash
-sudo ./isolate_cpus.bash
+chmod +x scripts/isolate_cpus.bash
+sudo ./scripts/isolate_cpus.bash --help
 ```
- 
-**Step 2: Run Application on Isolated Cores**
-Use the `run` command of the script to launch your application on the isolated Cores. This ensures the application has exclusive access to high-performance resources.
- 
+
+**Default isolation policy**
+
+```bash
+sudo ./scripts/isolate_cpus.bash
+```
+
+- Default reserved cores for application: first 8 cores (`0-7`).
+- System services are restricted to the remaining cores.
+- If total CPU cores are `<= 8`, isolation cannot be applied effectively and both app/system use all cores.
+
+**Custom application CPU set**
+
+```bash
+sudo ./scripts/isolate_cpus.bash 4          # App uses 0-3
+sudo ./scripts/isolate_cpus.bash 8-15       # App uses 8-15
+sudo ./scripts/isolate_cpus.bash 0,2,4,6    # App uses explicit core list
+```
+
+The selected app CPU set is saved to `/tmp/isolate_cpus_app.conf`.
+
+**CPU binding priority when cores are limited**
+
+- Reserve one dedicated core for the main thread first.
+- Then prioritize the TX/RX real-time threads.
+- Finally allocate cores to modulation/demodulation and sensing/signal-processing threads, because those latter stages have larger buffers and can absorb moderate scheduling jitter.
+
+In the web CPU-binding editor, this usually means prioritizing `main thread affinity` first, then `_tx_proc` / `rx_proc` and per-channel RX loops, and only after that the modulation/demodulation and sensing-processing workers.
+
+**Run application on reserved cores**
+
 ```bash
 cd build
-sudo ../isolate_cpus.bash run ./OFDMModulator
+sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 ```
- 
-> **Note:** Always use `sudo ../isolate_cpus.bash run ...` to launch the application if you have enabled CPU isolation. Direct execution or using `taskset` manually might fail due to affinity restrictions.
- 
-**Reset Configuration (Optional)**
-To restore the system to its default state (allowing all processes to use all cores):
+
+- `run` reads saved app CPUs from `/tmp/isolate_cpus_app.conf`.
+- If no saved config exists, `run` falls back to the default app CPU set.
+
+> **Note:** Always use `sudo ../scripts/isolate_cpus.bash run ...` to launch applications after isolation is set. Direct execution or manual `taskset` may fail due to slice affinity constraints.
+
+**Reset configuration (optional)**
+
 ```bash
-sudo ./isolate_cpus.bash reset
+sudo ./scripts/isolate_cpus.bash reset
 ```
 
-##### 7. Configuration
-The system now supports YAML configuration for easier parameter management.
+This removes the isolation settings and restores system slices to all CPUs.
 
-*   **Default Behavior**:
-    If `Modulator.yaml` or `Demodulator.yaml` exists in the execution directory, it will be loaded automatically.
+#### 7. Configuration
+The system uses YAML files for runtime configuration.
 
-*   **Specify Config File**:
-    Use `-c` or `--config` to specify a custom configuration file:
-    ```bash
-    ./OFDMModulator -c my_config.yaml
-    ```
-
-*   **Save Configuration**:
-    Use `-s` or `--save-config` to save the current parameters (including defaults and command-line overrides) to a YAML file:
-    ```bash
-    ./OFDMModulator --save-config
-    ```
-    This will generate `Modulator.yaml` (or `Demodulator.yaml`) with the current settings.
-    
-    You can also specify a custom filename:
-    ```bash
-    ./OFDMModulator -s myconfig.yaml
-    ```
+*   **Config filenames**:
+    `OFDMModulator` reads `Modulator.yaml`, and `OFDMDemodulator` reads `Demodulator.yaml` from the working directory.
+*   **First run**:
+    Template YAML files live in `config/`. Copy `config/Modulator_X310.yaml` / `config/Modulator_B210.yaml` or
+    `config/Demodulator_X310.yaml` / `config/Demodulator_B210.yaml` to `Modulator.yaml` / `Demodulator.yaml`, then edit them in place.
  
 ### Frontend (Python)
 
@@ -326,28 +341,28 @@ No code modifications are required; the system will automatically select the bes
 sudo -s
 cd build
 # For X310:
-cp ../Modulator_X310.yaml Modulator.yaml
-sudo ../isolate_cpus.bash run ./OFDMModulator
+cp ../config/Modulator_X310.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 
 # For B210:
-cp ../Modulator_B210.yaml Modulator.yaml
-sudo ../isolate_cpus.bash run ./OFDMModulator
+cp ../config/Modulator_B210.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 ```
-*Add `--default-ip=<your front end IP>` if you are using a separate computer for the frontend.*
+*If you are using a separate frontend computer, set `default_ip` in `Modulator.yaml` to that frontend IP.*
 
 ### 2. Startup of the UE
 ```bash
 sudo -s
 cd build
 # For X310:
-cp ../Demodulator_X310.yaml Demodulator.yaml
-sudo ../isolate_cpus.bash run ./OFDMDemodulator
+cp ../config/Demodulator_X310.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 
 # For B210:
-cp ../Demodulator_B210.yaml Demodulator.yaml
-sudo ../isolate_cpus.bash run ./OFDMDemodulator
+cp ../config/Demodulator_B210.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 ```
-*Add `--default-ip=<your front end IP>` if you are using a separate computer for the frontend.*
+*If you are using a separate frontend computer, set `default_ip` in `Demodulator.yaml` to that frontend IP.*
 
 ### 3. Stream video to the BS
 ```bash
@@ -364,86 +379,185 @@ ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 
 ### 5. Run monostatic frontend
 ```bash
-python3 ./plot_sensing.py
+python3 ./scripts/plot_sensing.py
 ```
 For better real-time performance (if an NVIDIA GPU is available):
 ```bash
-python3 ./plot_sensing_fast.py
+python3 ./scripts/plot_sensing_fast.py
 ```
 
 ### 6. Run bistatic frontend
 ```bash
-python3 ./plot_bi_sensing.py
+python3 ./scripts/plot_bi_sensing.py
 ```
 For better real-time performance (if an NVIDIA GPU is available):
 ```bash
-python3 ./plot_bi_sensing_fast.py
+python3 ./scripts/plot_bi_sensing_fast.py
 ```
+
+### 7. Web Config Console
+For remote-friendly configuration editing and process control, run:
+```bash
+python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
+```
+
+Then open `http://<your-host>:8765` in a browser.
+
+What it does:
+* Provides separate Modulator / Demodulator tabs.
+* Edits `build/Modulator.yaml` and `build/Demodulator.yaml` as parameter/value forms instead of a raw YAML text area.
+* Provides a dedicated CPU-binding editor for `cpu_cores`, with thread names, generated comments, and per-thread CPU selection.
+* Saves the current form back to YAML and starts/stops modulator and demodulator processes from the `build/` directory.
+* Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
+* Includes CPU command presets and a custom command field for each tab.
+
+Notes:
+* Default commands are `./OFDMModulator` and `./OFDMDemodulator`.
+* The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
+* If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; the latter stages have larger buffers and tolerate transient jitter better.
+* If `Enable runtime CPU isolation` is on, the console uses the current `cpu_cores` list to derive the default isolated CPU set and calls `scripts/isolate_cpus.bash` before launch.
+* If `Override CPU isolation list` is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.
+* If `Enable runtime CPU isolation` is off, the console still launches the selected command through the privileged runtime path, but it does not call `scripts/isolate_cpus.bash`.
+* The runtime panel also provides an optional sudo-password field and a `Reset CPU isolation` action.
+* Because the console can launch arbitrary commands entered in the web UI, bind it only to trusted networks or keep the default `127.0.0.1`.
 
 ### OFDM Modulator
 
-The `OFDMModulator` (BS Node) can be configured using the following command-line arguments:
+`OFDMModulator` is configured through `Modulator.yaml`.
+Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting template.
 
-| Argument | Default Value | Description |
-| :--- | :--- | :--- |
-| `--args` | `addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512` | USRP device arguments |
-| `--fft-size` | `1024` | FFT size |
-| `--cp-length` | `128` | Cyclic Prefix length |
-| `--sync-pos` | `1` | Synchronization symbol position index |
-| `--sample-rate` | `50e6` | Sample rate (Hz) |
-| `--bandwidth` | `50e6` | Analog bandwidth (Hz) |
-| `--center-freq` | `2.4e9` | Center frequency (Hz) |
-| `--tx-gain` | `20` | Transmission gain (dB) |
-| `--rx-gain` | `30` | Reception gain (dB) |
-| `--rx-channel` | `1` | RX channel index on the USRP |
-| `--zc-root` | `29` | Zadoff-Chu sequence root |
-| `--num-symbols` | `100` | Number of OFDM symbols per frame |
-| `--clock-source` | `external` | Clock source (`internal` or `external`) |
-| `--system-delay` | `63` | System delay samples for alignment |
-| `--wire-format-tx` | `sc16` | USRP TX wire format (`sc8` or `sc16`) |
-| `--wire-format-rx` | `sc16` | USRP RX wire format (`sc8` or `sc16`) |
-| `--mod-udp-ip` | `0.0.0.0` | IP to bind for incoming UDP data payload |
-| `--mod-udp-port` | `50000` | Port to bind for incoming UDP data payload |
-| `--sensing-ip` | `127.0.0.1` | Destination IP for sensing data |
-| `--sensing-port` | `8888` | Destination port for sensing data |
-| `--default-ip` | `127.0.0.1` | Default IP for all services |
-| `--cpu-cores` | `0,1,2,3,4,5` | Comma-separated list of CPU cores to use |
+`Modulator.yaml` parameter reference:
+
+| Key | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `fft_size` | `int` | `1024` | OFDM FFT size. |
+| `cp_length` | `int` | `128` | Cyclic prefix length (samples). |
+| `sync_pos` | `int` | `1` | Sync symbol index in one frame. |
+| `sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
+| `bandwidth` | `float` / Hz | `50000000` | Analog bandwidth, usually same as `sample_rate`. |
+| `center_freq` | `float` / Hz | `2400000000` | RF center frequency. |
+| `tx_gain` | `float` / dB | `30` | TX gain. |
+| `tx_channel` | `int` | `0` | TX channel index. |
+| `zc_root` | `int` | `29` | Zadoff-Chu root index. |
+| `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
+| `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
+| `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
+| `tx_device_args` | `string` | `""` | TX-specific USRP args. |
+| `rx_device_args` | `string` | `""` | Default sensing RX USRP args. |
+| `clock_source` | `string` | `internal/external/gpsdo` | Global clock source. |
+| `time_source` | `string` | `""` | Global time/PPS source; empty means follow `clock_source`. |
+| `tx_clock_source` | `string` | `""` | TX clock source override. |
+| `tx_time_source` | `string` | `""` | TX time source override. |
+| `rx_clock_source` | `string` | `""` | Default sensing RX clock source override. |
+| `rx_time_source` | `string` | `""` | Default sensing RX time source override. |
+| `wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
+| `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
+| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | Bind IP for incoming payload UDP packets. |
+| `udp_input_port` | `int` | `50000` | Bind port for incoming payload UDP packets. |
+| `mono_sensing_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for monostatic sensing output. |
+| `mono_sensing_port` | `int` | `8888` | Destination port for monostatic sensing output. |
+| `sensing_rx_channel_count` | `int` | `1` | Number of sensing RX channels (`0` disables sensing RX). |
+| `sensing_rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
+| `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for outputs that are not explicitly set. |
+| `control_port` | `int` | `9999` | UDP port for control commands (heartbeat/MTI/etc.). |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `data_ingest`, `sensing_proc`, and `sensing_process`; `all` enables every module. |
+| `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. Size this list for the TX thread, modulation thread, data-ingest thread, each enabled sensing channel's RX/sensing threads, and the main thread. If cores are limited, keep one dedicated core for the main thread first, then prioritize the TX and sensing RX threads, and only after that the modulation/data-ingest/sensing-processing threads because the latter stages have deeper buffers. |
+
+`sensing_rx_channels` object fields:
+
+| Key | Type | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `usrp_channel` | `int` | `0` | USRP RX channel index. |
+| `device_args` | `string` | `""` | Per-channel USRP args. |
+| `clock_source` | `string` | `""` | Per-channel clock source override. |
+| `time_source` | `string` | `""` | Per-channel time source override. |
+| `wire_format_rx` | `string` | `""` | Per-channel RX wire format override. |
+| `rx_gain` | `float` | `30` | RX gain for this channel. |
+| `alignment` | `int` | `63` | Per-channel alignment offset (samples). |
+| `rx_antenna` | `string` | `""` | RX antenna name, e.g. `TX/RX`, `RX1`. |
+| `enable_system_delay_estimation` | `bool` | `false` | If `true`, this channel performs a one-shot ZC-based system delay estimation at startup and keeps the sensing pipeline disabled while continuing to drain frames. |
+| `sensing_ip` | `string` | `127.0.0.1` | Per-channel sensing destination IP. |
+| `sensing_port` | `int` | `8888` | Per-channel sensing destination port. |
+
+Notes:
+* If `sensing_rx_channels` is empty and `sensing_rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
+* If the count and list size differ, the list is resized to match `sensing_rx_channel_count`.
+* When `enable_system_delay_estimation=true` for a channel, that channel performs one system delay estimation near startup, then skips further delay-estimation compute while continuing to drain frames. Normal sensing processing and sensing UDP output remain disabled.
+* In practice, keep hardware-specific fields such as `device_args`, `wire_format_*`, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.
 
 ### OFDM Demodulator
 
-The `OFDMDemodulator` (UE Node) supports the following arguments:
+`OFDMDemodulator` is configured through `Demodulator.yaml`.
+Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starting template.
 
-| Argument | Default Value | Description |
-| :--- | :--- | :--- |
-| `--device-args` | `num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520` | USRP device arguments |
-| `--fft-size` | `1024` | FFT size |
-| `--cp-length` | `128` | Cyclic Prefix length |
-| `--center-freq` | `2.4e9` | Center frequency (Hz) |
-| `--sample-rate` | `50e6` | Sample rate (Hz) |
-| `--bandwidth` | `50e6` | Analog bandwidth (Hz) |
-| `--rx-gain` | `60` | Reception gain (dB) |
-| `--rx-channel` | `0` | RX channel index |
-| `--sync-pos` | `1` | Synchronization symbol position index |
-| `--sensing-ip` | `127.0.0.1` | IP for sending sensing data |
-| `--sensing-port` | `8889` | Port for sending sensing data |
-| `--control-port` | `9999` | Port for receiving control commands (Heartbeat, MTI, etc.) |
-| `--channel-ip` | `127.0.0.1` | IP for channel estimation output |
-| `--channel-port` | `12348` | Port for channel estimation output |
-| `--pdf-ip` | `127.0.0.1` | IP for raw power delay profile (PDF) data output |
-| `--pdf-port` | `12349` | Port for raw power delay profile (PDF) data output |
-| `--constellation-ip` | `127.0.0.1` | IP for constellation diagram data |
-| `--constellation-port` | `12346` | Port for constellation diagram data |
-| `--freq-offset-ip` | `127.0.0.1` | IP for frequency offset data |
-| `--freq-offset-port` | `12347` | Port for frequency offset data |
-| `--udp-output-ip` | `127.0.0.1` | Destination IP for decoded user data |
-| `--udp-output-port` | `50001` | Destination port for decoded user data |
-| `--zc-root` | `29` | Zadoff-Chu sequence root |
-| `--num-symbols` | `100` | Number of symbols per frame |
-| `--sensing-symbol-num`| `100` | Number of symbols used for sensing processing |
-| `--clock-source` | `external` | Clock source (`internal` or `external`) |
-| `--software-sync` | `true` | Enable software synchronization/tracking |
-| `--hardware-sync` | `false` | Enable hardware synchronization (disables software sync) |
-| `--hardware-sync-tty` | `/dev/ttyUSB0` | TTY device for hardware sync |
-| `--wire-format-rx` | `sc16` | USRP RX wire format |
-| `--default-ip` | `127.0.0.1` | Default IP for all services |
-| `--cpu-cores` | `0,1,2,3,4,5` | Comma-separated list of CPU cores to use |
+`Demodulator.yaml` parameter reference:
+
+| Key | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `fft_size` | `int` | `1024` | OFDM FFT size. |
+| `cp_length` | `int` | `128` | Cyclic prefix length (samples). |
+| `sync_pos` | `int` | `1` | Sync symbol index in one frame. |
+| `sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
+| `bandwidth` | `float` / Hz | `50000000` | Analog bandwidth, usually same as `sample_rate`. |
+| `center_freq` | `float` / Hz | `2400000000` | RF center frequency. |
+| `rx_gain` | `float` / dB | `50` | RX gain. |
+| `rx_agc_enable` | `bool` | `false` | Enable hardware RX AGC. Tracking AGC uses the filtered `delay_spectrum` main peak to adjust USRP RX gain, applies stale-frame timestamp gating like alignment/frequency updates, and forces gain reduction when the sync symbol approaches ADC full scale. |
+| `rx_agc_low_threshold_db` | `float` / dB | `11.0` | Lower bound of the tracking AGC window. Gain is increased only when the filtered `delay_spectrum` main peak falls below this threshold. |
+| `rx_agc_high_threshold_db` | `float` / dB | `13.0` | Upper bound of the tracking AGC window. Gain is decreased only when the filtered `delay_spectrum` main peak rises above this threshold. |
+| `rx_agc_max_step_db` | `float` / dB | `3.0` | Maximum RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down. |
+| `rx_agc_update_frames` | `int` | `4` | Minimum processed-frame interval between tracking-stage AGC updates. Values below `1` are clamped to `1`. |
+| `rx_channel` | `int` | `0` | RX channel index. |
+| `zc_root` | `int` | `29` | Zadoff-Chu root index. |
+| `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
+| `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
+| `frame_queue_size` | `int` | `8` | Capacity of the demodulator RX frame queue. Values below `1` are clamped to `1`. |
+| `sync_queue_size` | `int` | `8` | Capacity of the demodulator sync-search batch queue. Values below `1` are clamped to `1`. |
+| `reset_hold_s` | `float` / s | `0.5` | How long invalid delay conditions must persist before the demodulator forces a hard reset back to sync search. Internally this is converted to a frame count from `samples_per_frame / sample_rate`. Values below `0` are clamped to `0.5`. |
+| `range_fft_size` | `int` | `1024` | Range FFT size. |
+| `doppler_fft_size` | `int` | `100` | Doppler FFT size. |
+| `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
+| `device_args` | `string` | `""` | USRP device args. |
+| `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
+| `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
+| `software_sync` | `bool` | `true` | Enable software synchronization tracking. |
+| `hardware_sync` | `bool` | `false` | Enable hardware synchronization. |
+| `hardware_sync_tty` | `string` | `/dev/ttyUSB0` | TTY device used by hardware sync controller. |
+| `ocxo_pi_switch_abs_error_ppm` | `float` | `0.0002` | Switch to slow-stage OCXO PI when absolute `error_ppm` stays below this threshold. |
+| `akf_enable` | `bool` | `true` | Enable adaptive Kalman filtering (AKF) on hardware-sync `error_ppm`. |
+| `akf_bootstrap_frames` | `int` | `64` | Cold-start frame count before AKF starts normal KF updates. |
+| `akf_innovation_window` | `int` | `64` | Innovation history window used for ACF/LS adaptation. |
+| `akf_max_lag` | `int` | `4` | Maximum innovation autocorrelation lag used in LS fitting. |
+| `akf_adapt_interval` | `int` | `64` | Frame interval for adaptive `Q/R` least-squares updates. |
+| `akf_gate_sigma` | `float` | `3.0` | Innovation gating threshold (sigma). |
+| `akf_tikhonov_lambda` | `float` | `1e-3` | Tikhonov regularization weight for LS adaptation. |
+| `akf_update_smooth` | `float` | `0.2` | Exponential smoothing factor for updated `Q/R`. |
+| `akf_q_wf_min` | `float` | `1e-10` | Lower bound of white-frequency-noise coefficient. |
+| `akf_q_wf_max` | `float` | `1e2` | Upper bound of white-frequency-noise coefficient. |
+| `akf_q_rw_min` | `float` | `1e-12` | Lower bound of random-walk-frequency-noise coefficient. |
+| `akf_q_rw_max` | `float` | `1e1` | Upper bound of random-walk-frequency-noise coefficient. |
+| `akf_r_min` | `float` | `1e-8` | Lower bound of observation-noise variance `R`. |
+| `akf_r_max` | `float` | `1e3` | Upper bound of observation-noise variance `R`. |
+| `ppm_adjust_factor` | `float` | `0.05` | Frequency offset compensation factor. |
+| `desired_peak_pos` | `int` | `20` | Target delay-peak position used by alignment logic. |
+| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and UDP output. When set to `false`, `OFDMDemodulator` skips bistatic sensing channel startup. |
+| `bi_sensing_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for bistatic sensing output. |
+| `bi_sensing_port` | `int` | `8889` | Destination port for bistatic sensing output. |
+| `channel_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for channel-estimation output. |
+| `channel_port` | `int` | `12348` | Destination port for channel-estimation output. |
+| `pdf_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for PDP/PDF output. |
+| `pdf_port` | `int` | `12349` | Destination port for PDP/PDF output. |
+| `constellation_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for constellation output. |
+| `constellation_port` | `int` | `12346` | Destination port for constellation output. |
+| `vofa_debug_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for VOFA+ debug output. |
+| `vofa_debug_port` | `int` | `12347` | Destination port for VOFA+ debug output. |
+| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for decoded payload output. |
+| `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
+| `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP used when output IP fields are empty. |
+| `control_port` | `int` | `9999` | UDP port for control commands. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `agc`, and `align`; `all` enables every module. `agc` gates AGC logs, while `align` gates runtime `ALGN:` logs. |
+| `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. If cores are limited, keep one dedicated core for the main thread first, then prioritize `rx_proc`, and only after that `process_proc`, `sensing_process_proc`, and `bit_processing_proc`, because those later stages have larger buffers and can better tolerate short scheduling jitter. |
+
+Notes:
+* RX AGC has two phases. During `SYNC_SEARCH`, the receiver resets gain to the configured `rx_gain` and performs a coarse search sweep (+1 dB every 10 frame-equivalents, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered `delay_spectrum` peak window defined by `rx_agc_low_threshold_db` and `rx_agc_high_threshold_db`.
+* Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the demodulator forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.
+* A hard reset clears timing/frequency tracking state, flushes pending queues, resets the tracking AGC state, and returns the receiver to `SYNC_SEARCH`. `reset_hold_s` controls how long bad delay conditions must persist before this happens.

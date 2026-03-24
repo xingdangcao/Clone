@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenISAC Config Console</title>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary-color: #0056b3;
+      --primary-strong: #00438c;
+      --secondary-color: #2c3e50;
+      --background-color: #f8f9fa;
+      --surface-color: #ffffff;
+      --surface-alt: #f4f7fb;
+      --text-color: #333333;
+      --muted-color: #5f6f82;
+      --border-color: #dee2e6;
+      --border-strong: #c8d2dd;
+      --ok: #198754;
+      --warn: #b7791f;
+      --err: #c0392b;
+      --shadow: 0 10px 30px rgba(44, 62, 80, 0.12);
+      --shadow-soft: 0 4px 6px rgba(0, 0, 0, 0.08);
+      --radius: 8px;
+      --code-font: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      --ui-font: "Roboto", "Segoe UI", Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: var(--ui-font);
+      line-height: 1.6;
+      color: var(--text-color);
+      background: var(--background-color);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(1460px, calc(100vw - 32px));
+      margin: 24px auto;
+      background: var(--surface-color);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .hero {
+      display: flex;
+      gap: 24px;
+      align-items: end;
+      justify-content: space-between;
+      padding: 40px 32px 32px;
+      background: linear-gradient(90deg, #e3ffe7 0%, #d9e7ff 100%);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: clamp(34px, 4vw, 46px);
+      line-height: 1.02;
+      letter-spacing: -0.03em;
+      color: var(--secondary-color);
+    }
+
+    .hero p, .hero code {
+      margin: 0;
+      color: var(--text-color);
+      font-size: 15px;
+    }
+
+    .hero code {
+      font-family: var(--code-font);
+      font-size: 13px;
+      color: var(--secondary-color);
+      background: rgba(255, 255, 255, 0.55);
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+
+    .tabbar {
+      display: inline-flex;
+      margin: 18px 32px 0;
+      padding: 6px;
+      gap: 6px;
+      border: 1px solid var(--border-color);
+      border-radius: 999px;
+      background: var(--surface-alt);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .tab {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--secondary-color);
+      padding: 11px 18px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 140ms ease;
+    }
+
+    .tab.active {
+      background: var(--primary-color);
+      color: white;
+      box-shadow: 0 8px 18px rgba(0, 86, 179, 0.28);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.95fr);
+      gap: 18px;
+      padding: 18px 32px 32px;
+    }
+
+    .panel {
+      background: var(--surface-color);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      background: var(--surface-alt);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+      color: var(--secondary-color);
+      border-left: 4px solid var(--primary-color);
+      padding-left: 12px;
+    }
+
+    .subtle {
+      color: var(--muted-color);
+      font-size: 12px;
+    }
+
+    .body {
+      padding: 18px;
+    }
+
+    .config-scroll {
+      max-height: 70vh;
+      overflow: auto;
+      padding-right: 6px;
+    }
+
+    .section-card {
+      padding: 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-color);
+      background: var(--surface-alt);
+    }
+
+    .section-card + .section-card {
+      margin-top: 14px;
+    }
+
+    .section-card h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--secondary-color);
+    }
+
+    .kv {
+      display: grid;
+      gap: 10px;
+    }
+
+    .kv-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.9fr) minmax(0, 1.2fr);
+      gap: 12px;
+      align-items: start;
+    }
+
+    .key-col {
+      min-width: 0;
+    }
+
+    .key-col code {
+      font-family: var(--code-font);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--secondary-color);
+    }
+
+    .hint {
+      margin-top: 4px;
+      color: var(--muted-color);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .value-col input, .value-col textarea, .value-col select {
+      width: 100%;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: white;
+      color: var(--text-color);
+      padding: 10px 12px;
+      font: inherit;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+
+    .value-col textarea {
+      min-height: 84px;
+      resize: vertical;
+      font-family: var(--code-font);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .checkbox-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 2px;
+      font-size: 14px;
+    }
+
+    .channel-card {
+      margin-top: 10px;
+      padding: 12px;
+      border-radius: 6px;
+      border: 1px dashed var(--border-strong);
+      background: rgba(255, 255, 255, 0.95);
+    }
+
+    .channel-card h4 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      color: var(--primary-color);
+    }
+
+    .cpu-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .cpu-table th, .cpu-table td {
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border-color);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .cpu-table th {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted-color);
+    }
+
+    .cpu-table code {
+      font-family: var(--code-font);
+      font-size: 12px;
+      color: var(--secondary-color);
+    }
+
+    .cpu-table input {
+      width: 100%;
+      min-width: 72px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+
+    .actions, .row, .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .actions {
+      margin-top: 14px;
+      align-items: center;
+    }
+
+    .row {
+      align-items: end;
+      margin-bottom: 14px;
+    }
+
+    .meta {
+      margin-top: 10px;
+      color: var(--muted-color);
+      font-size: 12px;
+    }
+
+    .field {
+      flex: 1 1 220px;
+      min-width: 0;
+    }
+
+    .field label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: var(--secondary-color);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .field input, .field select {
+      width: 100%;
+      height: 44px;
+      padding: 0 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      background: white;
+      color: var(--text-color);
+      font: inherit;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border-color);
+      border-radius: 999px;
+      background: white;
+      color: var(--secondary-color);
+      padding: 11px 16px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 120ms ease;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .btn.primary {
+      background: var(--primary-color);
+      border-color: var(--primary-color);
+      color: white;
+    }
+
+    .btn.warn {
+      background: #fff6e5;
+      border-color: #f1d3a7;
+      color: var(--warn);
+    }
+
+    .btn.danger {
+      background: #fff1ef;
+      border-color: #f3c0b7;
+      color: var(--err);
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 16px rgba(44, 62, 80, 0.14);
+    }
+    .btn:disabled { opacity: 0.55; cursor: wait; transform: none; }
+
+    .status-card {
+      display: grid;
+      gap: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: white;
+      border: 1px solid var(--border-color);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--secondary-color);
+    }
+
+    .pill .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--muted-color);
+    }
+
+    .pill.running .dot { background: var(--ok); }
+    .pill.stopped .dot { background: var(--err); }
+
+    .card {
+      padding: 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-color);
+      background: var(--surface-alt);
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: var(--secondary-color);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .mono {
+      font-family: var(--code-font);
+      font-size: 12px;
+      line-height: 1.5;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+
+    .logbox {
+      min-height: 42vh;
+      max-height: 42vh;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 6px;
+      background: #1a1a1a;
+      color: #f8f8f2;
+      border: 1px solid #2d3748;
+      font-family: var(--code-font);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .flash {
+      min-height: 18px;
+      font-size: 13px;
+      color: var(--muted-color);
+      font-weight: 500;
+    }
+
+    .flash.ok { color: var(--ok); }
+    .flash.err { color: var(--err); }
+
+    input:focus, textarea:focus, select:focus, .btn:focus, .tab:focus {
+      outline: none;
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 3px rgba(0, 86, 179, 0.14);
+    }
+
+    @media (max-width: 1024px) {
+      .grid {
+        grid-template-columns: 1fr;
+        padding-top: 16px;
+      }
+      .config-scroll {
+        max-height: none;
+      }
+      .kv-row {
+        grid-template-columns: 1fr;
+      }
+      .logbox {
+        min-height: 28vh;
+        max-height: 28vh;
+      }
+      .hero {
+        padding: 28px 20px 24px;
+        align-items: start;
+        flex-direction: column;
+      }
+      .tabbar {
+        margin: 16px 20px 0;
+      }
+      .grid {
+        padding: 16px 20px 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div>
+        <h1>OpenISAC Config Console</h1>
+        <p>Parameter/value configuration editing, CPU binding, and remote runtime control.</p>
+      </div>
+      <div class="subtle">
+        Runtime files are edited in-place from the build directory.<br>
+        <code id="buildDirLabel"></code>
+      </div>
+    </section>
+
+    <div class="tabbar" role="tablist">
+      <button class="tab active" data-target="modulator" role="tab">Modulator</button>
+      <button class="tab" data-target="demodulator" role="tab">Demodulator</button>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="editorTitle">Modulator Config</h2>
+            <div class="subtle" id="configPathLabel"></div>
+          </div>
+          <div class="flash" id="flash"></div>
+        </div>
+        <div class="body">
+          <div class="config-scroll">
+            <div id="configSections"></div>
+            <div class="card" style="margin-top: 14px;">
+              <h3>CPU Binding</h3>
+              <div class="subtle" id="cpuBindingIntro">Thread-aware CPU selection for this tab.</div>
+              <div id="cpuBindingTable"></div>
+              <div class="meta">
+                <span id="cpuListPreview">isolated CPUs: -</span>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="saveBtn">Save Config</button>
+            <button class="btn" id="reloadBtn">Reload Disk</button>
+          </div>
+          <div class="meta">
+            <span id="mtimeLabel">mtime: -</span>
+            <span id="fileStateLabel">file: -</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="runtimeTitle">Modulator Runtime</h2>
+            <div class="subtle">Start/stop binaries and watch recent output.</div>
+          </div>
+          <div class="pill stopped" id="statusPill"><span class="dot"></span><span id="statusText">stopped</span></div>
+        </div>
+        <div class="body status-card">
+          <div class="row">
+            <div class="field">
+              <label for="presetSelect">Preset</label>
+              <select id="presetSelect"></select>
+            </div>
+            <div class="field">
+              <label for="commandInput">Command</label>
+              <input id="commandInput" type="text" autocomplete="off">
+            </div>
+          </div>
+          <div class="card">
+            <h3>Runtime Options</h3>
+            <label class="checkbox-row">
+              <input id="isolateToggle" type="checkbox" checked>
+              <span>Enable runtime CPU isolation</span>
+            </label>
+            <label class="checkbox-row" style="margin-top: 10px;">
+              <input id="overrideIsolateToggle" type="checkbox">
+              <span>Override CPU isolation list</span>
+            </label>
+            <div class="field" style="margin-top: 10px;">
+              <label for="overrideIsolateInput">Isolate CPU List</label>
+              <input id="overrideIsolateInput" type="text" autocomplete="off" disabled placeholder="e.g. 4,5,8-10">
+            </div>
+            <div class="field" style="margin-top: 10px;">
+              <label for="sudoPasswordInput">Sudo Password</label>
+              <input id="sudoPasswordInput" type="password" autocomplete="current-password" placeholder="Optional; used for privileged runtime actions">
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="startBtn">Save + Start</button>
+            <button class="btn danger" id="stopBtn">Stop</button>
+            <button class="btn warn" id="resetIsolationBtn">Reset CPU isolation</button>
+            <button class="btn" id="refreshBtn">Refresh</button>
+          </div>
+          <div class="card">
+            <h3>Process</h3>
+            <div class="mono" id="processMeta">-</div>
+          </div>
+          <div class="card">
+            <h3>Logs</h3>
+            <div class="logbox" id="logBox"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const APP = {{APP_STATE_JSON}};
+
+    const tabs = Array.from(document.querySelectorAll('.tab'));
+    const flash = document.getElementById('flash');
+    const saveBtn = document.getElementById('saveBtn');
+    const reloadBtn = document.getElementById('reloadBtn');
+    const presetSelect = document.getElementById('presetSelect');
+    const commandInput = document.getElementById('commandInput');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const resetIsolationBtn = document.getElementById('resetIsolationBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const configPathLabel = document.getElementById('configPathLabel');
+    const buildDirLabel = document.getElementById('buildDirLabel');
+    const editorTitle = document.getElementById('editorTitle');
+    const runtimeTitle = document.getElementById('runtimeTitle');
+    const mtimeLabel = document.getElementById('mtimeLabel');
+    const fileStateLabel = document.getElementById('fileStateLabel');
+    const processMeta = document.getElementById('processMeta');
+    const statusPill = document.getElementById('statusPill');
+    const statusText = document.getElementById('statusText');
+    const logBox = document.getElementById('logBox');
+    const configSections = document.getElementById('configSections');
+    const cpuBindingTable = document.getElementById('cpuBindingTable');
+    const cpuListPreview = document.getElementById('cpuListPreview');
+    const isolateToggle = document.getElementById('isolateToggle');
+    const overrideIsolateToggle = document.getElementById('overrideIsolateToggle');
+    const overrideIsolateInput = document.getElementById('overrideIsolateInput');
+    const sudoPasswordInput = document.getElementById('sudoPasswordInput');
+
+    let currentTab = 'modulator';
+    const cache = {};
+
+    function setFlash(message, kind = '') {
+      flash.textContent = message || '';
+      flash.className = 'flash' + (kind ? ' ' + kind : '');
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      const text = await response.text();
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { ok: false, error: text || 'Invalid JSON response' };
+      }
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error || response.statusText || 'Request failed');
+      }
+      return payload;
+    }
+
+    function updateTabVisuals() {
+      for (const tabButton of tabs) {
+        tabButton.classList.toggle('active', tabButton.dataset.target === currentTab);
+      }
+      const label = APP.tabs[currentTab].label;
+      editorTitle.textContent = label + ' Config';
+      runtimeTitle.textContent = label + ' Runtime';
+      buildDirLabel.textContent = APP.build_dir;
+      updateRuntimeOptionControls();
+    }
+
+    function populatePresets(tab) {
+      presetSelect.innerHTML = '';
+      for (const preset of APP.tabs[tab].presets) {
+        const option = document.createElement('option');
+        option.value = preset.command;
+        option.textContent = preset.label;
+        presetSelect.appendChild(option);
+      }
+      const draftCommand = cache[tab]?.draftCommand || APP.tabs[tab].default_command;
+      const matched = APP.tabs[tab].presets.find((preset) => preset.command === draftCommand);
+      presetSelect.value = matched ? matched.command : APP.tabs[tab].presets[0].command;
+    }
+
+    function parseIntOrNull(text) {
+      if (text === null || text === undefined) return null;
+      const trimmed = String(text).trim();
+      if (!trimmed) return null;
+      const value = Number.parseInt(trimmed, 10);
+      return Number.isFinite(value) ? value : null;
+    }
+
+    function currentModel() {
+      return cache[currentTab]?.config;
+    }
+
+    function currentRuntimePrefs(tab = currentTab) {
+      if (!cache[tab]) cache[tab] = {};
+      if (!cache[tab].runtimePrefs) {
+        cache[tab].runtimePrefs = { isolateCpu: true, overrideIsolate: false, customCpuSpec: '' };
+      }
+      return cache[tab].runtimePrefs;
+    }
+
+    function defaultCpuSpec() {
+      const model = currentModel();
+      if (!model?.cpu_cores?.values) return '';
+      const unique = [...new Set(model.cpu_cores.values)].sort((a, b) => a - b);
+      return unique.join(',');
+    }
+
+    function updateRuntimeOptionControls() {
+      const prefs = currentRuntimePrefs(currentTab);
+      const defaultSpec = defaultCpuSpec();
+      isolateToggle.checked = prefs.isolateCpu;
+      overrideIsolateToggle.checked = prefs.overrideIsolate;
+      if (!prefs.overrideIsolate) {
+        overrideIsolateInput.value = defaultSpec;
+      } else {
+        if (!prefs.customCpuSpec) {
+          prefs.customCpuSpec = defaultSpec;
+        }
+        overrideIsolateInput.value = prefs.customCpuSpec;
+      }
+      overrideIsolateInput.disabled = !prefs.isolateCpu || !prefs.overrideIsolate;
+    }
+
+    function findField(model, key) {
+      if (!model?.sections) return null;
+      for (const section of model.sections) {
+        for (const field of section.fields) {
+          if (field.key === key) return field;
+        }
+      }
+      return null;
+    }
+
+    function ensureSensingChannelItems() {
+      const model = currentModel();
+      if (!model) return;
+      const field = findField(model, 'sensing_rx_channels');
+      if (!field) return;
+      const countField = findField(model, 'sensing_rx_channel_count');
+      const countRaw = countField ? (countField.value_text ?? countField.value ?? '') : '';
+      const count = Math.max(0, parseIntOrNull(countRaw) ?? 0);
+      const items = Array.isArray(field.items) ? field.items : [];
+      field.items = items;
+      const template = items[0] ? structuredClone(items[0]) : (() => {
+        const obj = {};
+        for (const sub of (field.item_fields || [])) obj[sub.key] = '';
+        return obj;
+      })();
+      while (items.length < count) {
+        items.push(structuredClone(template));
+      }
+      while (items.length > count) {
+        items.pop();
+      }
+    }
+
+    function cpuThreadRows(tab, cpuValues) {
+      const rows = [];
+      if (tab === 'modulator') {
+        rows.push({ slot: 0, comment: 'idx0 (hint 0): _tx_proc', label: '_tx_proc' });
+        rows.push({ slot: 1, comment: 'idx1 (hint 1): _modulation_proc', label: '_modulation_proc' });
+        rows.push({ slot: 2, comment: 'idx2 (hint 2): _data_ingest_proc', label: '_data_ingest_proc' });
+        const countField = findField(currentModel(), 'sensing_rx_channel_count');
+        const countRaw = countField ? (countField.value_text ?? countField.value ?? '') : '';
+        const count = Math.max(0, parseIntOrNull(countRaw) ?? 0);
+        for (let ch = 0; ch < count; ch += 1) {
+          rows.push({
+            slot: rows.length,
+            comment: `idx${rows.length} (hint ${rows.length}): SensingChannel::_rx_loop (CH${ch})`,
+            label: `SensingChannel::_rx_loop (CH${ch})`,
+          });
+          rows.push({
+            slot: rows.length,
+            comment: `idx${rows.length} (hint ${rows.length}): SensingChannel::_sensing_loop (CH${ch})`,
+            label: `SensingChannel::_sensing_loop (CH${ch})`,
+          });
+        }
+      } else {
+        rows.push({ slot: 0, comment: 'idx0 (hint 0): rx_proc', label: 'rx_proc' });
+        rows.push({ slot: 1, comment: 'idx1 (hint 1): process_proc', label: 'process_proc' });
+        rows.push({ slot: 2, comment: 'idx2 (hint 2): sensing_process_proc', label: 'sensing_process_proc' });
+        rows.push({ slot: 3, comment: 'idx3 (hint 3): bit_processing_proc', label: 'bit_processing_proc' });
+      }
+      rows.push({ slot: rows.length, comment: 'idx_last: main thread affinity', label: 'main thread affinity' });
+      while (cpuValues.length > rows.length) {
+        const slot = rows.length;
+        rows.push({ slot, comment: `extra[${slot}]`, label: `extra[${slot}]` });
+      }
+      return rows.map((row, index) => ({
+        ...row,
+        cpu: cpuValues[index] ?? '',
+      }));
+    }
+
+    function renderCpuBinding() {
+      const model = currentModel();
+      if (!model) return;
+      const cpuValues = model.cpu_cores.values;
+      const rows = cpuThreadRows(currentTab, cpuValues);
+      model.cpu_cores.rows = rows;
+
+      const table = document.createElement('table');
+      table.className = 'cpu-table';
+      table.innerHTML = `
+        <thead>
+          <tr><th>Thread</th><th>Comment</th><th>CPU</th></tr>
+        </thead>
+        <tbody></tbody>
+      `;
+      const tbody = table.querySelector('tbody');
+      for (const row of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><code>${row.label}</code></td>
+          <td class="hint">${row.comment}</td>
+          <td><input type="text" data-cpu-row="${row.slot}" value="${row.cpu ?? ''}" placeholder="e.g. 4"></td>
+        `;
+        tbody.appendChild(tr);
+      }
+      cpuBindingTable.innerHTML = '';
+      cpuBindingTable.appendChild(table);
+
+      cpuBindingTable.querySelectorAll('input[data-cpu-row]').forEach((input) => {
+        input.addEventListener('input', () => {
+          const slot = Number.parseInt(input.dataset.cpuRow, 10);
+          model.cpu_cores.rows[slot].cpu = input.value;
+          syncCpuValuesFromRows();
+        });
+      });
+      syncCpuValuesFromRows();
+    }
+
+    function syncCpuValuesFromRows() {
+      const model = currentModel();
+      if (!model) return;
+      const values = [];
+      for (const row of model.cpu_cores.rows) {
+        const parsed = parseIntOrNull(row.cpu);
+        if (parsed !== null) values.push(parsed);
+      }
+      model.cpu_cores.values = values;
+      const unique = [...new Set(values)].sort((a, b) => a - b);
+      cpuListPreview.textContent = unique.length ? `isolated CPUs: ${unique.join(',')}` : 'isolated CPUs: -';
+      updateRuntimeOptionControls();
+    }
+
+    function renderSections() {
+      const model = currentModel();
+      if (!model) return;
+      ensureSensingChannelItems();
+      configSections.innerHTML = '';
+
+      for (const section of model.sections) {
+        const card = document.createElement('div');
+        card.className = 'section-card';
+        const title = document.createElement('h3');
+        title.textContent = section.title;
+        card.appendChild(title);
+
+        const kv = document.createElement('div');
+        kv.className = 'kv';
+
+        for (const field of section.fields) {
+          if (field.type === 'cpu_cores') {
+            continue;
+          }
+
+          if (field.type === 'mapping_list') {
+            const holder = document.createElement('div');
+            holder.className = 'kv-row';
+            holder.innerHTML = `
+              <div class="key-col">
+                <code>${field.key}</code>
+                <div class="hint">${field.display_comment || field.comment || ''}</div>
+              </div>
+              <div class="value-col"></div>
+            `;
+            const valueCol = holder.querySelector('.value-col');
+            field.items.forEach((item, index) => {
+              const channel = document.createElement('div');
+              channel.className = 'channel-card';
+              const heading = document.createElement('h4');
+              heading.textContent = `${field.key}[${index}]`;
+              channel.appendChild(heading);
+              const inner = document.createElement('div');
+              inner.className = 'kv';
+              field.item_fields.forEach((sub) => {
+                const row = document.createElement('div');
+                row.className = 'kv-row';
+                const value = item[sub.key] ?? '';
+                row.innerHTML = `
+                  <div class="key-col">
+                    <code>${sub.key}</code>
+                    <div class="hint">${sub.display_comment || sub.comment || ''}</div>
+                  </div>
+                  <div class="value-col"></div>
+                `;
+                const controlHost = row.querySelector('.value-col');
+                if (sub.kind === 'bool') {
+                  const wrapper = document.createElement('label');
+                  wrapper.className = 'checkbox-row';
+                  const input = document.createElement('input');
+                  input.type = 'checkbox';
+                  input.checked = Boolean(value);
+                  input.addEventListener('change', () => {
+                    item[sub.key] = input.checked;
+                  });
+                  wrapper.appendChild(input);
+                  controlHost.appendChild(wrapper);
+                } else {
+                  const input = document.createElement('input');
+                  input.type = 'text';
+                  input.value = value === null || value === undefined ? '' : String(value);
+                  input.addEventListener('input', () => {
+                    item[sub.key] = input.value;
+                  });
+                  controlHost.appendChild(input);
+                }
+                inner.appendChild(row);
+              });
+              channel.appendChild(inner);
+              valueCol.appendChild(channel);
+            });
+            kv.appendChild(holder);
+            continue;
+          }
+
+          const row = document.createElement('div');
+          row.className = 'kv-row';
+          row.innerHTML = `
+            <div class="key-col">
+              <code>${field.key}</code>
+              <div class="hint">${field.display_comment || field.comment || ''}</div>
+            </div>
+            <div class="value-col"></div>
+          `;
+          const controlHost = row.querySelector('.value-col');
+          if (field.kind === 'bool') {
+            const wrapper = document.createElement('label');
+            wrapper.className = 'checkbox-row';
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = Boolean(field.value);
+            input.addEventListener('change', () => {
+              field.value = input.checked;
+              if (field.key === 'sensing_rx_channel_count') {
+                renderSections();
+                renderCpuBinding();
+              }
+            });
+            wrapper.appendChild(input);
+            controlHost.appendChild(wrapper);
+          } else {
+            const input = document.createElement(field.type === 'flow_list' ? 'textarea' : 'input');
+            if (field.type !== 'flow_list') input.type = 'text';
+            input.value = field.value_text;
+            input.addEventListener('input', () => {
+              field.value_text = input.value;
+              if (field.key === 'sensing_rx_channel_count') {
+                field.value = input.value;
+                renderSections();
+                renderCpuBinding();
+              }
+            });
+            controlHost.appendChild(input);
+            if (field.display_unit) {
+              const unit = document.createElement('div');
+              unit.className = 'hint';
+              unit.textContent = `Display unit: ${field.display_unit}`;
+              controlHost.appendChild(unit);
+            }
+          }
+          kv.appendChild(row);
+        }
+
+        card.appendChild(kv);
+        configSections.appendChild(card);
+      }
+
+      renderCpuBinding();
+    }
+
+    function gatherSavePayload() {
+      const model = currentModel();
+      const scalars = {};
+      const mappingLists = {};
+      for (const section of model.sections) {
+        for (const field of section.fields) {
+          if (field.type === 'cpu_cores') continue;
+          if (field.type === 'mapping_list') {
+            mappingLists[field.key] = field.items;
+          } else if (field.kind === 'bool') {
+            scalars[field.key] = field.value;
+          } else {
+            scalars[field.key] = field.value_text;
+          }
+        }
+      }
+      syncCpuValuesFromRows();
+      return {
+        name: currentTab,
+        scalars,
+        mapping_lists: mappingLists,
+        cpu_cores: model.cpu_cores.values,
+      };
+    }
+
+    async function loadConfig(tab, preserveCommand = false) {
+      const data = await api(`/api/config?name=${encodeURIComponent(tab)}`);
+      cache[tab] = {
+        ...cache[tab],
+        config: data,
+      };
+      if (tab !== currentTab) return;
+
+      configPathLabel.textContent = data.path;
+      mtimeLabel.textContent = data.mtime ? `mtime: ${data.mtime}` : 'mtime: -';
+      fileStateLabel.textContent = data.exists ? 'file: present' : 'file: missing';
+      renderSections();
+      if (!preserveCommand) {
+        const draftCommand = cache[tab]?.draftCommand || cache[tab]?.runtime?.command || APP.tabs[tab].default_command;
+        cache[tab].draftCommand = draftCommand;
+        commandInput.value = draftCommand;
+      }
+    }
+
+    function renderRuntime(tab) {
+      const runtime = cache[tab]?.runtime;
+      if (!runtime || tab !== currentTab) return;
+
+      const running = runtime.running;
+      statusPill.classList.toggle('running', running);
+      statusPill.classList.toggle('stopped', !running);
+      statusText.textContent = running ? 'running' : 'stopped';
+      processMeta.textContent =
+        `pid: ${runtime.pid ?? '-'}\n` +
+        `return code: ${runtime.returncode ?? '-'}\n` +
+        `cwd: ${runtime.cwd}\n` +
+        `unit: ${runtime.unit_name || '-'}\n` +
+        `isolate cpu: ${runtime.isolate_enabled ? 'on' : 'off'}\n` +
+        `isolated CPUs: ${runtime.cpu_spec || '-'}\n` +
+        `command: ${runtime.command || '-'}`;
+      logBox.textContent = runtime.logs.length ? runtime.logs.join('\n') : '(no log output yet)';
+      logBox.scrollTop = logBox.scrollHeight;
+      if (!running && !commandInput.matches(':focus')) {
+        const draftCommand = cache[tab]?.draftCommand || runtime.command || APP.tabs[tab].default_command;
+        commandInput.value = draftCommand;
+      }
+    }
+
+    async function refreshRuntime(tab) {
+      const data = await api(`/api/process?name=${encodeURIComponent(tab)}`);
+      cache[tab] = { ...cache[tab], runtime: data };
+      renderRuntime(tab);
+    }
+
+    async function saveCurrentTab(showMessage = true) {
+      const result = await api('/api/config/save', {
+        method: 'POST',
+        body: JSON.stringify(gatherSavePayload()),
+      });
+      cache[currentTab] = { ...cache[currentTab], config: result };
+      renderSections();
+      if (showMessage) setFlash('Saved successfully.', 'ok');
+    }
+
+    async function switchTab(tab) {
+      currentTab = tab;
+      updateTabVisuals();
+      populatePresets(tab);
+      await loadConfig(tab);
+      await refreshRuntime(tab);
+      setFlash('');
+    }
+
+    presetSelect.addEventListener('change', () => {
+      commandInput.value = presetSelect.value;
+      cache[currentTab] = {
+        ...cache[currentTab],
+        draftCommand: presetSelect.value,
+      };
+    });
+
+    commandInput.addEventListener('input', () => {
+      cache[currentTab] = {
+        ...cache[currentTab],
+        draftCommand: commandInput.value,
+      };
+    });
+
+    isolateToggle.addEventListener('change', () => {
+      const prefs = currentRuntimePrefs(currentTab);
+      prefs.isolateCpu = isolateToggle.checked;
+      updateRuntimeOptionControls();
+    });
+
+    overrideIsolateToggle.addEventListener('change', () => {
+      const prefs = currentRuntimePrefs(currentTab);
+      prefs.overrideIsolate = overrideIsolateToggle.checked;
+      if (prefs.overrideIsolate) {
+        prefs.customCpuSpec = defaultCpuSpec();
+      }
+      updateRuntimeOptionControls();
+    });
+
+    overrideIsolateInput.addEventListener('input', () => {
+      currentRuntimePrefs(currentTab).customCpuSpec = overrideIsolateInput.value;
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      try {
+        await saveCurrentTab(true);
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    reloadBtn.addEventListener('click', async () => {
+      reloadBtn.disabled = true;
+      try {
+        await loadConfig(currentTab, true);
+        setFlash('Reloaded from disk.', 'ok');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        reloadBtn.disabled = false;
+      }
+    });
+
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      try {
+        await saveCurrentTab(false);
+        const runtime = await api('/api/process/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: currentTab,
+            command: commandInput.value,
+            isolate_cpu: isolateToggle.checked,
+            override_isolate: overrideIsolateToggle.checked,
+            isolate_cpu_spec: overrideIsolateInput.value,
+            sudo_password: sudoPasswordInput.value,
+          }),
+        });
+        cache[currentTab] = { ...cache[currentTab], runtime, draftCommand: commandInput.value };
+        renderRuntime(currentTab);
+        setFlash('Process started.', 'ok');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      try {
+        const runtime = await api('/api/process/stop', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: currentTab,
+            sudo_password: sudoPasswordInput.value,
+          }),
+        });
+        cache[currentTab] = { ...cache[currentTab], runtime };
+        renderRuntime(currentTab);
+        setFlash('Process stopped.', 'ok');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        stopBtn.disabled = false;
+      }
+    });
+
+    resetIsolationBtn.addEventListener('click', async () => {
+      resetIsolationBtn.disabled = true;
+      try {
+        const runtime = await api('/api/process/reset-isolation', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: currentTab,
+            sudo_password: sudoPasswordInput.value,
+          }),
+        });
+        cache[currentTab] = { ...cache[currentTab], runtime };
+        renderRuntime(currentTab);
+        setFlash('CPU isolation reset.', 'ok');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        resetIsolationBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true;
+      try {
+        await refreshRuntime(currentTab);
+        setFlash('Runtime status refreshed.', 'ok');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+
+    tabs.forEach((tabButton) => {
+      tabButton.addEventListener('click', () => {
+        switchTab(tabButton.dataset.target).catch((error) => setFlash(error.message, 'err'));
+      });
+    });
+
+    setInterval(() => {
+      refreshRuntime(currentTab).catch(() => {});
+    }, 1500);
+
+    switchTab(currentTab).catch((error) => setFlash(error.message, 'err'));
+  </script>
+</body>
+</html>

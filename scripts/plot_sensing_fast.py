@@ -1,0 +1,1387 @@
+import argparse
+import numpy as np
+import sys
+import os
+import time
+import threading
+from queue import Queue, Empty
+from collections import deque
+import socket
+import struct
+import datetime
+import scipy.io as sio
+
+# PyQt6 + PyQtGraph Imports
+from PyQt6 import QtWidgets, QtCore
+import pyqtgraph as pg
+
+# ====== Backend Detection ======
+USE_NVIDIA_GPU = False
+USE_INTEL_GPU = False
+cp = None
+xp = np
+
+try:
+    import cupy as _cp
+    try:
+        _gpu_count = _cp.cuda.runtime.getDeviceCount()
+        if _gpu_count > 0:
+            USE_NVIDIA_GPU = True
+            cp = _cp
+            xp = _cp
+            print(f"Backend: Using NVIDIA GPU via CuPy (devices: {_gpu_count})")
+    except Exception as _e:
+        print(f"Backend: CuPy available but CUDA init failed: {_e}")
+except ImportError:
+    pass
+
+if not USE_NVIDIA_GPU:
+    def _try_intel_gpu():
+        global USE_INTEL_GPU, cp, xp
+        try:
+            import dpnp as _dpnp
+            import dpctl
+            try:
+                _intel_devices = [d for d in dpctl.get_devices() if d.is_gpu]
+            except Exception:
+                _intel_devices = []
+            if _intel_devices:
+                return _dpnp, _intel_devices[0].name
+            return None, None
+        except Exception:
+            return None, None
+
+    _intel_result = [None, None]
+
+    def _intel_init_thread():
+        _intel_result[0], _intel_result[1] = _try_intel_gpu()
+
+    _init_thread = threading.Thread(target=_intel_init_thread, daemon=True)
+    _init_thread.start()
+    _init_thread.join(timeout=5.0)
+
+    if not _init_thread.is_alive() and _intel_result[0] is not None:
+        USE_INTEL_GPU = True
+        cp = _intel_result[0]
+        xp = _intel_result[0]
+        print(f"Backend: Using Intel GPU via dpnp ({_intel_result[1]})")
+
+USE_GPU = USE_NVIDIA_GPU or USE_INTEL_GPU
+if not USE_GPU:
+    print("Backend: No GPU acceleration available; using CPU")
+
+HAVE_NUMBA = False
+try:
+    from numba import njit, prange
+    HAVE_NUMBA = True
+    print("Backend: Numba available for CPU acceleration")
+except ImportError:
+    print("Backend: Numba not available")
+
+
+def to_numpy(arr):
+    if hasattr(arr, 'get'):
+        return arr.get()
+    if hasattr(arr, 'asnumpy'):
+        return arr.asnumpy()
+    if hasattr(arr, '__array__'):
+        return np.asarray(arr)
+    return arr
+
+
+try:
+    from scipy.signal import stft
+except Exception:
+    def stft(x, fs=1.0, window='hamming', nperseg=256, noverlap=192, nfft=256, return_onesided=False):
+        x = np.asarray(x)
+        if x.ndim != 1:
+            x = x.ravel()
+        step = nperseg - noverlap
+        if isinstance(window, str):
+            w = np.hamming(nperseg).astype(np.float32) if window.lower() == 'hamming' else np.ones(nperseg, dtype=np.float32)
+        else:
+            w = np.asarray(window).astype(np.float32)
+        n_frames = 1 + max(0, (len(x) - nperseg) // step)
+        Zxx = np.empty((nfft, n_frames), dtype=np.complex64)
+        for i in range(n_frames):
+            start = i * step
+            seg = x[start:start + nperseg]
+            if len(seg) < nperseg:
+                seg = np.pad(seg, (0, nperseg - len(seg)))
+            buf = np.zeros(nfft, dtype=np.complex64)
+            buf[:nperseg] = (seg * w).astype(np.complex64)
+            Zxx[:, i] = np.fft.fft(buf)
+        f = np.fft.fftfreq(nfft, d=1.0 / fs)
+        t = (np.arange(n_frames) * step) / fs
+        return f, t, Zxx
+
+
+# ====== Global Configuration ======
+UDP_IP = "0.0.0.0"
+DEFAULT_CONTROL_PORT = 9999
+FFT_SIZE = 1024
+NUM_SYMBOLS = 100
+MAX_CHUNK_SIZE = 60000
+HEADER_SIZE = 12
+SOCKET_BUFFER_SIZE = 8 * 1024 * 1024
+MAX_RANGE_BIN = 1000
+MAX_DOPPLER_BINS = 1000
+RANGE_FFT_SIZE = 10240
+DOPPLER_FFT_SIZE = 1000
+
+enable_mti = True
+enable_range_window = True
+enable_doppler_window = True
+
+RAW_QUEUE_SIZE = 20
+DISPLAY_QUEUE_SIZE = 5
+DISPLAY_DOWNSAMPLE = 1
+BUFFER_LENGTH = 5000
+C_LIGHT_MPS = 299792458.0
+ANTENNA_SPACING_M = 42.83e-3
+
+selected_range_bin = 0
+show_micro_doppler = True
+display_channel = 0
+
+PHASE_SYNC_CACHE_SIZE = 128
+
+running = True
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Monostatic sensing viewer (fast, multi-channel)")
+    parser.add_argument(
+        "--ports",
+        type=str,
+        default="8888,8889",
+        help="Comma-separated UDP ports for sensing channels, e.g. 8888,8889",
+    )
+    parser.add_argument(
+        "--control-port",
+        type=int,
+        default=DEFAULT_CONTROL_PORT,
+        help="Fallback control port before heartbeat detection",
+    )
+    return parser.parse_args()
+
+
+class FrameBuffer:
+    def __init__(self):
+        self.frame_id = 0
+        self.total_chunks = 0
+        self.buffer = [None] * 1024
+        self.received_chunks = 0
+
+    def init(self, frame_id, total_chunks):
+        self.frame_id = frame_id
+        self.total_chunks = total_chunks
+        self.buffer = [None] * total_chunks
+        self.received_chunks = 0
+
+    def add_chunk(self, chunk_id, data):
+        if chunk_id < self.total_chunks and self.buffer[chunk_id] is None:
+            self.buffer[chunk_id] = data
+            self.received_chunks += 1
+            return self.received_chunks == self.total_chunks
+        return False
+
+    def assemble_frame(self):
+        byte_data = b"".join(self.buffer[:self.total_chunks])
+        complex_array = np.frombuffer(byte_data, dtype=np.complex64)
+        return self.frame_id, complex_array.reshape((NUM_SYMBOLS, FFT_SIZE))
+
+
+class ChannelRuntime:
+    def __init__(self, ch_id, udp_port, control_port):
+        self.ch_id = ch_id
+        self.udp_port = udp_port
+        self.control_port = control_port
+
+        self.frame_buffer = FrameBuffer()
+        self.buffer_lock = threading.Lock()
+
+        self.raw_frame_queue = Queue(maxsize=RAW_QUEUE_SIZE)
+        self.display_queue = Queue(maxsize=DISPLAY_QUEUE_SIZE)
+
+        self.sender_ip = None
+        self.sender_lock = threading.Lock()
+
+        self.range_time_data = None
+        self.range_time_lock = threading.Lock()
+
+        self.micro_doppler_buffer = deque(maxlen=BUFFER_LENGTH)
+        self.micro_lock = threading.Lock()
+
+        self.current_display_data = {}
+        self.last_frame_id = None
+
+
+args = parse_args()
+UDP_PORTS = [int(x.strip()) for x in args.ports.split(",") if x.strip()]
+if not UDP_PORTS:
+    UDP_PORTS = [8888, 8889]
+CHANNELS = [ChannelRuntime(idx, port, args.control_port) for idx, port in enumerate(UDP_PORTS)]
+if not CHANNELS:
+    CHANNELS = [ChannelRuntime(0, 8888, args.control_port)]
+
+phase_sync_cache = [dict() for _ in CHANNELS]  # ch_id => frame_id -> rd_complex
+phase_sync_order = [deque(maxlen=PHASE_SYNC_CACHE_SIZE) for _ in CHANNELS]
+
+
+# ====== Network + Control ======
+def _get_target_channels(target_ch_id=None):
+    if target_ch_id is None:
+        return CHANNELS
+    if target_ch_id < 0 or target_ch_id >= len(CHANNELS):
+        return []
+    return [CHANNELS[target_ch_id]]
+
+
+def _current_control_channel_id():
+    if not CHANNELS:
+        return None
+    return max(0, min(display_channel, len(CHANNELS) - 1))
+
+
+def send_control_command(cmd_id, value, target_ch_id=None):
+    targets = _get_target_channels(target_ch_id)
+    if not targets:
+        print("Error: Invalid target channel")
+        return
+
+    sent_any = False
+    for ch in targets:
+        with ch.sender_lock:
+            ip = ch.sender_ip
+            cport = ch.control_port
+        if ip is None:
+            print(f"Error: CH{ch.ch_id + 1} sender not detected; skip {cmd_id.decode(errors='ignore').strip()}")
+            continue
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            command_data = struct.pack("!4s4si", b"CMD ", cmd_id, int(value))
+            sock.sendto(command_data, (ip, cport))
+            sock.close()
+            print(f"Sent {cmd_id.decode(errors='ignore').strip()}={value} to CH{ch.ch_id + 1} {ip}:{cport}")
+            sent_any = True
+        except Exception as e:
+            print(f"Failed to send command to CH{ch.ch_id + 1}: {e}")
+
+    if not sent_any:
+        print("Error: No valid sender for command delivery")
+
+
+def send_skip_command():
+    ch_id = _current_control_channel_id()
+    if ch_id is None:
+        return
+
+    for _ in range(100):
+        ch = CHANNELS[ch_id]
+        with ch.sender_lock:
+            if ch.sender_ip is not None:
+                break
+        time.sleep(0.1)
+
+    send_control_command(b"SKIP", 1, ch_id)
+
+
+def udp_receiver(ch):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_SIZE)
+    except Exception:
+        pass
+
+    try:
+        sock.bind((UDP_IP, ch.udp_port))
+        print(f"[CH{ch.ch_id + 1}] Listening on UDP port {ch.udp_port}")
+    except Exception as e:
+        print(f"[CH{ch.ch_id + 1}] Socket bind error: {e}")
+        return
+
+    while running:
+        try:
+            data, addr = sock.recvfrom(MAX_CHUNK_SIZE + HEADER_SIZE)
+
+            with ch.sender_lock:
+                if ch.sender_ip is None:
+                    ch.sender_ip = addr[0]
+                    print(f"[CH{ch.ch_id + 1}] Detected sender IP: {ch.sender_ip}")
+
+            if len(data) >= 8 and data[:4] == b"CTRL":
+                with ch.sender_lock:
+                    if ch.control_port != addr[1]:
+                        ch.control_port = addr[1]
+                        print(f"[CH{ch.ch_id + 1}] Control port updated: {ch.sender_ip}:{ch.control_port}")
+                continue
+
+            if len(data) < HEADER_SIZE:
+                continue
+
+            try:
+                frame_id, total_chunks, chunk_id = struct.unpack("!III", data[:HEADER_SIZE])
+            except struct.error:
+                continue
+
+            chunk_data = data[HEADER_SIZE:]
+            with ch.buffer_lock:
+                if ch.frame_buffer.frame_id != frame_id:
+                    ch.frame_buffer.init(frame_id, total_chunks)
+                if ch.frame_buffer.add_chunk(chunk_id, chunk_data):
+                    frame_item = ch.frame_buffer.assemble_frame()
+                    if ch.raw_frame_queue.full():
+                        try:
+                            ch.raw_frame_queue.get_nowait()
+                        except Exception:
+                            pass
+                    ch.raw_frame_queue.put(frame_item)
+
+        except socket.error as e:
+            if getattr(e, "errno", None) != 10054:
+                print(f"[CH{ch.ch_id + 1}] Socket error: {e}")
+        except Exception as e:
+            print(f"[CH{ch.ch_id + 1}] Receiver error: {e}")
+
+    sock.close()
+
+
+receiver_threads = []
+for _ch in CHANNELS:
+    _t = threading.Thread(target=udp_receiver, args=(_ch,), daemon=True)
+    _t.start()
+    receiver_threads.append(_t)
+
+
+# ====== FFT Processing ======
+if USE_GPU:
+    range_window = cp.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE), dtype=cp.float32)
+    doppler_window = cp.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1), dtype=cp.float32)
+else:
+    range_window = np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32)
+    doppler_window = np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32)
+
+if HAVE_NUMBA:
+    @njit(parallel=True, fastmath=True)
+    def cpu_prep_range_fft(frame_data, window, fft_size, range_fft_size):
+        num_symbols = frame_data.shape[0]
+        half_n = fft_size // 2
+        out = np.zeros((num_symbols, range_fft_size), dtype=np.complex64)
+        for i in prange(num_symbols):
+            for j in range(half_n):
+                out[i, j] = frame_data[i, j + half_n] * window[0, j]
+            for j in range(half_n):
+                out[i, j + half_n] = frame_data[i, j] * window[0, j + half_n]
+        return out
+
+    @njit(parallel=True, fastmath=True)
+    def cpu_prep_doppler_fft(range_time, window, num_symbols, doppler_fft_size, range_fft_size):
+        out = np.zeros((doppler_fft_size, range_fft_size), dtype=np.complex64)
+        for i in prange(num_symbols):
+            for j in range(range_fft_size):
+                out[i, j] = range_time[i, j] * window[i, 0]
+        return out
+
+    @njit(parallel=True, fastmath=True)
+    def cpu_calc_mag_db(doppler_fft_data, num_symbols, fft_size):
+        rows = doppler_fft_data.shape[0]
+        cols = doppler_fft_data.shape[1]
+        half_rows = rows // 2
+        out = np.empty((rows, cols), dtype=np.float32)
+        norm_factor = 1.0 / np.sqrt(num_symbols * fft_size)
+        for j in prange(cols):
+            for i in range(half_rows):
+                out[i, j] = 20.0 * np.log10(np.abs(doppler_fft_data[i + half_rows, j]) * norm_factor + 1e-12)
+            for i in range(half_rows):
+                out[i + half_rows, j] = 20.0 * np.log10(np.abs(doppler_fft_data[i, j]) * norm_factor + 1e-12)
+        return out
+
+
+def process_range_doppler(frame_data, max_view_range_bins=None):
+    if max_view_range_bins is None:
+        max_view_range_bins = MAX_RANGE_BIN
+
+    range_win = range_window if enable_range_window else (
+        cp.ones((1, FFT_SIZE), dtype=cp.float32) if USE_GPU else np.ones((1, FFT_SIZE), dtype=np.float32)
+    )
+    doppler_win = doppler_window if enable_doppler_window else (
+        cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32) if USE_GPU else np.ones((NUM_SYMBOLS, 1), dtype=np.float32)
+    )
+
+    if USE_GPU:
+        frame_data_gpu = cp.array(frame_data)
+        shifted_data = cp.fft.fftshift(frame_data_gpu, axes=1)
+        windowed_data = shifted_data * range_win
+
+        padded_data = cp.zeros((NUM_SYMBOLS, RANGE_FFT_SIZE), dtype=cp.complex64)
+        padded_data[:, :FFT_SIZE] = windowed_data
+        range_time = cp.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
+
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        range_time_cpu = to_numpy(range_time_view)
+
+        range_time_gpu = cp.array(range_time_cpu, dtype=cp.complex64)
+        doppler_windowed = range_time_gpu * doppler_win
+        view_width = range_time_view.shape[1]
+
+        padded_doppler = cp.zeros((DOPPLER_FFT_SIZE, view_width), dtype=cp.complex64)
+        padded_doppler[:NUM_SYMBOLS, :] = doppler_windowed
+        doppler_fft = cp.fft.fft(padded_doppler, axis=0)
+        doppler_shifted = cp.fft.fftshift(doppler_fft, axes=0)
+
+        magnitude = cp.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        magnitude_db = 20 * cp.log10(magnitude + 1e-12)
+        return to_numpy(magnitude_db), range_time_cpu, to_numpy(doppler_shifted)
+
+    if HAVE_NUMBA:
+        padded_data = cpu_prep_range_fft(frame_data, range_win, FFT_SIZE, RANGE_FFT_SIZE)
+        range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        view_width = range_time_view.shape[1]
+
+        padded_doppler = cpu_prep_doppler_fft(range_time_view, doppler_win, NUM_SYMBOLS, DOPPLER_FFT_SIZE, view_width)
+        doppler_fft = np.fft.fft(padded_doppler, axis=0)
+        doppler_shifted = np.fft.fftshift(doppler_fft, axes=0)
+        magnitude_db = cpu_calc_mag_db(doppler_fft, NUM_SYMBOLS, FFT_SIZE)
+        return magnitude_db, range_time_view, doppler_shifted
+
+    shifted_data = np.fft.fftshift(frame_data, axes=1)
+    windowed_data = shifted_data * range_win
+    padded_data = np.zeros((NUM_SYMBOLS, RANGE_FFT_SIZE), dtype=np.complex64)
+    padded_data[:, :FFT_SIZE] = windowed_data
+    range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
+
+    range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+    view_width = range_time_view.shape[1]
+
+    doppler_windowed = range_time_view * doppler_win
+    padded_doppler = np.zeros((DOPPLER_FFT_SIZE, view_width), dtype=np.complex64)
+    padded_doppler[:NUM_SYMBOLS, :] = doppler_windowed
+    doppler_fft = np.fft.fft(padded_doppler, axis=0)
+    doppler_shifted = np.fft.fftshift(doppler_fft, axes=0)
+
+    magnitude_db = 20 * np.log10(np.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE) + 1e-12)
+    return magnitude_db, range_time_view, doppler_shifted
+
+
+def accumulate_range_time_data(ch):
+    with ch.range_time_lock:
+        data = ch.range_time_data
+    if data is not None:
+        with ch.micro_lock:
+            ch.micro_doppler_buffer.extend(data[:, selected_range_bin])
+
+
+def calculate_micro_doppler(ch):
+    with ch.micro_lock:
+        if len(ch.micro_doppler_buffer) < 256:
+            return None, None, None
+        complex_signal = np.array(ch.micro_doppler_buffer)
+
+    f, t, Zxx = stft(
+        complex_signal,
+        fs=1.0,
+        window='hamming',
+        nperseg=256,
+        noverlap=192,
+        nfft=256,
+        return_onesided=False,
+    )
+    Pxx_db = 20 * np.log10(np.abs(Zxx) + 1e-12)
+    Pxx_db_shifted = np.fft.fftshift(Pxx_db, axes=0)
+    f_shifted = np.fft.fftshift(f)
+    f_idx = (f_shifted > -0.5) & (f_shifted < 0.5)
+    return f_shifted[f_idx], t, Pxx_db_shifted[f_idx, :]
+
+
+def _process_one_raw_item(ch, raw_item):
+    if isinstance(raw_item, tuple) and len(raw_item) == 2:
+        frame_id, raw_frame = raw_item
+    else:
+        frame_id, raw_frame = -1, raw_item
+
+    t_start = time.time()
+
+    rd_spectrum, range_time_view, rd_complex = process_range_doppler(raw_frame)
+    with ch.range_time_lock:
+        ch.range_time_data = range_time_view
+
+    if rd_spectrum.shape[1] > MAX_RANGE_BIN:
+        rd_spectrum = rd_spectrum[:, :MAX_RANGE_BIN]
+        rd_complex = rd_complex[:, :MAX_RANGE_BIN]
+
+    center_idx = rd_spectrum.shape[0] // 2
+    start_idx = max(0, center_idx - MAX_DOPPLER_BINS // 2)
+    end_idx = min(rd_spectrum.shape[0], start_idx + MAX_DOPPLER_BINS)
+    rd_spectrum = rd_spectrum[start_idx:end_idx, :]
+    rd_complex = rd_complex[start_idx:end_idx, :]
+
+    # Keep matrix orientation consistent with DSP output (no transpose)
+    rd_spectrum_plot = rd_spectrum
+    rd_complex_plot = rd_complex.astype(np.complex64, copy=False)
+
+    if DISPLAY_DOWNSAMPLE > 1:
+        rd_spectrum_plot = rd_spectrum_plot[::DISPLAY_DOWNSAMPLE, ::DISPLAY_DOWNSAMPLE]
+        rd_complex_plot = rd_complex_plot[::DISPLAY_DOWNSAMPLE, ::DISPLAY_DOWNSAMPLE]
+
+    md_spectrum = None
+    md_extent = None
+    if show_micro_doppler:
+        accumulate_range_time_data(ch)
+        f, t, Pxx = calculate_micro_doppler(ch)
+        if Pxx is not None:
+            # Display orientation: Y=Doppler, X=Time
+            md_spectrum = Pxx
+            x0 = float(t[0]) if len(t) > 0 else 0.0
+            x1 = float(t[-1]) if len(t) > 1 else (x0 + 1.0)
+            y0 = float(f[0]) if len(f) > 0 else -0.5
+            y1 = float(f[-1]) if len(f) > 1 else (y0 + 1.0)
+            md_extent = [x0, x1, y0, y1]
+
+    dsp_time = time.time() - t_start
+
+    result = {
+        'ch_id': ch.ch_id,
+        'frame_id': int(frame_id),
+        'raw': raw_frame,
+        'rd': rd_spectrum_plot,
+        'rd_complex': rd_complex_plot,
+        'md': md_spectrum,
+        'md_extent': md_extent,
+        'dsp_time': dsp_time,
+    }
+
+    if ch.display_queue.full():
+        try:
+            ch.display_queue.get_nowait()
+        except Exception:
+            pass
+    ch.display_queue.put(result)
+
+
+def dsp_worker():
+    print("DSP Worker started (multi-channel round-robin)")
+    rr_idx = 0
+    n_ch = len(CHANNELS)
+
+    while running:
+        did_work = False
+
+        for step in range(n_ch):
+            ch = CHANNELS[(rr_idx + step) % n_ch]
+            latest_item = None
+            while True:
+                try:
+                    latest_item = ch.raw_frame_queue.get_nowait()
+                except Empty:
+                    break
+                except Exception:
+                    break
+
+            if latest_item is None:
+                continue
+
+            try:
+                _process_one_raw_item(ch, latest_item)
+                did_work = True
+            except Exception as e:
+                print(f"[CH{ch.ch_id + 1}] DSP Worker Error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        if n_ch > 0:
+            rr_idx = (rr_idx + 1) % n_ch
+
+        if not did_work:
+            time.sleep(0.001)
+
+
+dsp_thread = threading.Thread(target=dsp_worker, daemon=True)
+dsp_thread.start()
+
+
+# ====== Channel phase synchronization ======
+def cache_phase_frame(ch_id, frame_id, rd_complex):
+    if ch_id < 0 or ch_id >= len(CHANNELS) or frame_id is None or frame_id < 0 or rd_complex is None:
+        return
+    cache = phase_sync_cache[ch_id]
+    order = phase_sync_order[ch_id]
+    if frame_id in cache:
+        cache[frame_id] = rd_complex
+        return
+    if len(order) == order.maxlen:
+        old_id = order.popleft()
+        cache.pop(old_id, None)
+    order.append(frame_id)
+    cache[frame_id] = rd_complex
+
+
+def trim_phase_cache(min_keep):
+    for ch_id in range(len(CHANNELS)):
+        order = phase_sync_order[ch_id]
+        cache = phase_sync_cache[ch_id]
+        while order and order[0] < min_keep:
+            old_id = order.popleft()
+            cache.pop(old_id, None)
+
+
+# ====== Command Functions ======
+def send_alignment_command(val):
+    target = _current_control_channel_id()
+    if target is None:
+        return
+    # ALGN in backend is applied to the currently selected ALCH target.
+    send_control_command(b"ALCH", int(target), target)
+    send_control_command(b"ALGN", int(val), target)
+
+
+def send_strd_command(val):
+    target = _current_control_channel_id()
+    if target is None:
+        return
+    try:
+        strd_val = max(1, min(NUM_SYMBOLS, int(val)))
+        send_control_command(b"STRD", strd_val, target)
+    except ValueError:
+        print(f"Invalid STRD value: {val}")
+
+
+def send_mti_command(enabled):
+    target = _current_control_channel_id()
+    if target is None:
+        return
+    send_control_command(b"MTI ", 1 if enabled else 0, target)
+
+
+def send_tx_gain_command(val):
+    target = _current_control_channel_id()
+    if target is None:
+        return
+    try:
+        gain_db = float(val)
+        gain_x10 = int(round(gain_db * 10.0))
+        send_control_command(b"TXGN", gain_x10, target)
+        print(f"Requested TX gain: {gain_db:.1f} dB (CH{target + 1})")
+    except ValueError:
+        print(f"Invalid TX gain value: {val}")
+
+
+def send_rx_gain_command(val):
+    target = _current_control_channel_id()
+    if target is None:
+        return
+    try:
+        gain_db = float(val)
+        gain_x10 = int(round(gain_db * 10.0))
+        # Select target sensing channel in modulator, then apply RX gain.
+        send_control_command(b"ALCH", int(target), target)
+        send_control_command(b"RXGN", gain_x10, target)
+        print(f"Requested RX gain: {gain_db:.1f} dB (CH{target + 1})")
+    except ValueError:
+        print(f"Invalid RX gain value: {val}")
+
+
+# ====== MainWindow with PyQt6 + PyQtGraph ======
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("OpenISAC Sensing - PyQtGraph (Multi-Channel)")
+        self.resize(1600, 900)
+
+        self.phase_ready = False
+        self.synced_frame_id = None
+        self.synced_rd_complex = None
+        self.phase_curve_raw = None
+        self.phase_curve_comp = None
+        self.phase_bias_per_channel = np.zeros(len(CHANNELS), dtype=np.float64)
+        self.phase_calibrated = False
+        self.center_freq_hz = 2.4e9
+        self.clicked_range_idx = None
+        self.clicked_doppler_idx = None
+        self.rd_doppler_min = 0.0
+        self.rd_doppler_span = 1.0
+
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QtWidgets.QHBoxLayout(central_widget)
+
+        # Plot Area
+        plot_widget = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(plot_widget)
+        main_layout.addWidget(plot_widget, stretch=4)
+
+        # Range-Doppler Plot
+        self.rd_plot = pg.PlotWidget(title="Range-Doppler Spectrum")
+        # RD uses col-major mapping: x <- first index(doppler), y <- second index(range)
+        self.rd_img = pg.ImageItem(axisOrder='col-major')
+        self.rd_plot.addItem(self.rd_img)
+        self.rd_plot.setLabel('left', 'Range Bin')
+        self.rd_plot.setLabel('bottom', 'Doppler Bin')
+        self.rd_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
+        self.rd_colorbar = pg.ColorBarItem(values=(0, 60), colorMap=pg.colormap.get('turbo'), interactive=False)
+        self.rd_colorbar.setImageItem(self.rd_img, insert_in=self.rd_plot.plotItem)
+
+        self.rd_click_marker = pg.ScatterPlotItem([], [], symbol='x', size=12, pen=pg.mkPen('w', width=2))
+        self.rd_plot.addItem(self.rd_click_marker)
+        self.rd_plot.scene().sigMouseClicked.connect(self.on_rd_mouse_clicked)
+
+        plot_layout.addWidget(self.rd_plot)
+
+        # Micro-Doppler Plot
+        self.md_plot = pg.PlotWidget(title="Micro-Doppler Spectrum")
+        # MD uses row-major mapping: x <- second index(time), y <- first index(doppler)
+        self.md_img = pg.ImageItem(axisOrder='row-major')
+        self.md_plot.addItem(self.md_img)
+        self.md_plot.setLabel('left', 'Doppler')
+        self.md_plot.setLabel('bottom', 'Time')
+        self.md_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
+        self.md_colorbar = pg.ColorBarItem(values=(0, 60), colorMap=pg.colormap.get('turbo'), interactive=False)
+        self.md_colorbar.setImageItem(self.md_img, insert_in=self.md_plot.plotItem)
+        plot_layout.addWidget(self.md_plot)
+
+        # Phase-Channel Curve Plot
+        self.phase_curve_plot = pg.PlotWidget(title="Phase-Channel Curve @ Clicked RD Point")
+        self.phase_curve_plot.setLabel('left', 'Phase (rad, unwrapped)')
+        self.phase_curve_plot.setLabel('bottom', 'Channel Index')
+        self.phase_curve_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.phase_curve_plot.addLegend(offset=(8, 8))
+        self.phase_curve_raw_item = self.phase_curve_plot.plot(
+            [], [], pen=pg.mkPen('#f7d154', width=2), symbol='o', symbolSize=6, name='Raw'
+        )
+        self.phase_curve_comp_item = self.phase_curve_plot.plot(
+            [], [], pen=pg.mkPen('#4cc9f0', width=2), symbol='x', symbolSize=7, name='Calibrated'
+        )
+        plot_layout.addWidget(self.phase_curve_plot)
+
+        # Control Panel
+        control_panel = QtWidgets.QWidget()
+        control_layout = QtWidgets.QVBoxLayout(control_panel)
+        control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        main_layout.addWidget(control_panel, stretch=1)
+
+        # Status Labels
+        self.lbl_display = QtWidgets.QLabel("Display: CH1")
+        self.lbl_fps = QtWidgets.QLabel("FPS: 0.0")
+        self.lbl_queue = QtWidgets.QLabel("Queue: 0")
+        self.lbl_sender = QtWidgets.QLabel("Sender: Detecting...")
+        self.lbl_buffer = QtWidgets.QLabel("MD Buffer: 0/5000")
+        self.lbl_phase_sync = QtWidgets.QLabel("Phase Sync: waiting same frame across channels")
+        self.lbl_phase_clicked = QtWidgets.QLabel("Phase@Clicked: click RD map to query")
+        self.lbl_aoa_status = QtWidgets.QLabel("AoA: waiting calibration/click")
+
+        for lbl in [
+            self.lbl_display,
+            self.lbl_fps,
+            self.lbl_queue,
+            self.lbl_sender,
+            self.lbl_buffer,
+            self.lbl_phase_sync,
+            self.lbl_phase_clicked,
+            self.lbl_aoa_status,
+        ]:
+            control_layout.addWidget(lbl)
+
+        control_layout.addSpacing(16)
+
+        # Display channel selector
+        ch_select_layout = QtWidgets.QHBoxLayout()
+        ch_select_layout.addWidget(QtWidgets.QLabel("Display CH:"))
+        self.combo_display_channel = QtWidgets.QComboBox()
+        self.combo_display_channel.currentIndexChanged.connect(self.on_display_channel_changed)
+        ch_select_layout.addWidget(self.combo_display_channel)
+        control_layout.addLayout(ch_select_layout)
+        self.refresh_display_button_text()
+
+        control_layout.addSpacing(16)
+
+        # Range Bin
+        rb_layout = QtWidgets.QHBoxLayout()
+        rb_layout.addWidget(QtWidgets.QLabel("Range Bin:"))
+        self.txt_range_bin = QtWidgets.QLineEdit(str(selected_range_bin))
+        btn_set_rb = QtWidgets.QPushButton("Set")
+        btn_set_rb.clicked.connect(self.set_range_bin)
+        rb_layout.addWidget(self.txt_range_bin)
+        rb_layout.addWidget(btn_set_rb)
+        control_layout.addLayout(rb_layout)
+
+        # Micro-Doppler Toggle
+        self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
+        self.btn_md.setCheckable(True)
+        self.btn_md.setChecked(True)
+        self.btn_md.clicked.connect(self.toggle_micro_doppler)
+        self.btn_md.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
+        control_layout.addWidget(self.btn_md)
+        control_layout.addSpacing(20)
+
+        # Alignment
+        align_layout = QtWidgets.QHBoxLayout()
+        align_layout.addWidget(QtWidgets.QLabel("Delay:"))
+        self.txt_delay = QtWidgets.QLineEdit("0")
+        btn_apply = QtWidgets.QPushButton("Apply")
+        btn_apply.clicked.connect(self.apply_alignment)
+        align_layout.addWidget(self.txt_delay)
+        align_layout.addWidget(btn_apply)
+        control_layout.addLayout(align_layout)
+
+        quick_layout = QtWidgets.QHBoxLayout()
+        for label, val in [('+57600', 57600), ('-57600', -57600), ('+10', 10), ('-10', -10), ('+1', 1), ('-1', -1)]:
+            btn = QtWidgets.QPushButton(label)
+            btn.clicked.connect(lambda ch, v=val: send_alignment_command(v))
+            quick_layout.addWidget(btn)
+        control_layout.addLayout(quick_layout)
+        control_layout.addSpacing(20)
+
+        # STRD
+        strd_layout = QtWidgets.QHBoxLayout()
+        strd_layout.addWidget(QtWidgets.QLabel("STRD:"))
+        self.txt_strd = QtWidgets.QLineEdit("20")
+        btn_strd = QtWidgets.QPushButton("Set")
+        btn_strd.clicked.connect(self.set_strd)
+        strd_layout.addWidget(self.txt_strd)
+        strd_layout.addWidget(btn_strd)
+        control_layout.addLayout(strd_layout)
+        
+        tx_gain_layout = QtWidgets.QHBoxLayout()
+        tx_gain_layout.addWidget(QtWidgets.QLabel("TX Gain(dB):"))
+        self.txt_tx_gain = QtWidgets.QLineEdit("20.0")
+        btn_tx_gain = QtWidgets.QPushButton("Set")
+        btn_tx_gain.clicked.connect(self.set_tx_gain)
+        tx_gain_layout.addWidget(self.txt_tx_gain)
+        tx_gain_layout.addWidget(btn_tx_gain)
+        control_layout.addLayout(tx_gain_layout)
+
+        rx_gain_layout = QtWidgets.QHBoxLayout()
+        rx_gain_layout.addWidget(QtWidgets.QLabel("RX Gain(dB):"))
+        self.txt_rx_gain = QtWidgets.QLineEdit("30.0")
+        btn_rx_gain = QtWidgets.QPushButton("Set")
+        btn_rx_gain.clicked.connect(self.set_rx_gain)
+        rx_gain_layout.addWidget(self.txt_rx_gain)
+        rx_gain_layout.addWidget(btn_rx_gain)
+        control_layout.addLayout(rx_gain_layout)
+
+        aoa_freq_layout = QtWidgets.QHBoxLayout()
+        aoa_freq_layout.addWidget(QtWidgets.QLabel("Center Freq(GHz):"))
+        self.txt_center_freq_ghz = QtWidgets.QLineEdit("2.4")
+        btn_center_freq = QtWidgets.QPushButton("Set")
+        btn_center_freq.clicked.connect(self.set_center_freq)
+        aoa_freq_layout.addWidget(self.txt_center_freq_ghz)
+        aoa_freq_layout.addWidget(btn_center_freq)
+        control_layout.addLayout(aoa_freq_layout)
+
+        self.btn_calibrate = QtWidgets.QPushButton("Calibrate Phase")
+        self.btn_calibrate.clicked.connect(self.calibrate_phase_bias)
+        control_layout.addWidget(self.btn_calibrate)
+        control_layout.addSpacing(20)
+
+        # Toggles
+        self.btn_mti = QtWidgets.QPushButton("MTI")
+        self.update_toggle_style(self.btn_mti, enable_mti)
+        self.btn_mti.clicked.connect(self.toggle_mti)
+        control_layout.addWidget(self.btn_mti)
+
+        self.btn_range_win = QtWidgets.QPushButton("Range Window")
+        self.update_toggle_style(self.btn_range_win, enable_range_window)
+        self.btn_range_win.clicked.connect(self.toggle_range_win)
+        control_layout.addWidget(self.btn_range_win)
+
+        self.btn_doppler_win = QtWidgets.QPushButton("Doppler Window")
+        self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
+        self.btn_doppler_win.clicked.connect(self.toggle_doppler_win)
+        control_layout.addWidget(self.btn_doppler_win)
+        control_layout.addSpacing(20)
+
+        # Save
+        save_layout = QtWidgets.QHBoxLayout()
+        for name, fn in [("Save Raw", self.save_raw), ("Save RD", self.save_rd), ("Save MD", self.save_md)]:
+            btn = QtWidgets.QPushButton(name)
+            btn.clicked.connect(fn)
+            save_layout.addWidget(btn)
+        control_layout.addLayout(save_layout)
+        control_layout.addStretch()
+
+        # Timer
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_plots)
+        # Avoid overwhelming Qt event loop under sustained high-rate streams.
+        self.timer.start(5)
+
+        self.last_update_time = time.time()
+        self.frame_count = 0
+        self.total_dsp_time = 0.0
+
+        threading.Thread(target=send_skip_command, daemon=True).start()
+
+    def update_toggle_style(self, btn, state):
+        btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
+
+    def refresh_display_button_text(self):
+        global display_channel
+        n_ch = len(CHANNELS)
+        if n_ch <= 0:
+            display_channel = 0
+            self.combo_display_channel.setEnabled(False)
+            self.lbl_display.setText("Display: N/A")
+            self.phase_curve_plot.setVisible(False)
+            if hasattr(self, "btn_calibrate"):
+                self.btn_calibrate.setEnabled(False)
+            return
+
+        display_channel = max(0, min(display_channel, n_ch - 1))
+
+        if self.combo_display_channel.count() != n_ch:
+            self.combo_display_channel.blockSignals(True)
+            self.combo_display_channel.clear()
+            self.combo_display_channel.addItems([f"CH{i + 1}" for i in range(n_ch)])
+            self.combo_display_channel.blockSignals(False)
+
+        if self.combo_display_channel.currentIndex() != display_channel:
+            self.combo_display_channel.blockSignals(True)
+            self.combo_display_channel.setCurrentIndex(display_channel)
+            self.combo_display_channel.blockSignals(False)
+
+        self.combo_display_channel.setEnabled(n_ch > 1)
+        self.phase_curve_plot.setVisible(n_ch >= 2)
+        if hasattr(self, "btn_calibrate"):
+            self.btn_calibrate.setEnabled(n_ch >= 2)
+        self.lbl_display.setText(f"Display: CH{display_channel + 1}")
+
+    def _get_display_channel_runtime(self):
+        if not CHANNELS:
+            return None
+        ch_idx = max(0, min(display_channel, len(CHANNELS) - 1))
+        return CHANNELS[ch_idx]
+
+    def on_display_channel_changed(self, idx):
+        global display_channel
+        if idx < 0 or idx >= len(CHANNELS):
+            return
+        display_channel = idx
+        self.refresh_display_button_text()
+        print(f"Display channel switched to CH{display_channel + 1}")
+
+    def toggle_display_channel(self):
+        global display_channel
+        if len(CHANNELS) < 2:
+            return
+        display_channel = (display_channel + 1) % len(CHANNELS)
+        self.refresh_display_button_text()
+        print(f"Display channel switched to CH{display_channel + 1}")
+
+    def set_range_bin(self):
+        global selected_range_bin
+        try:
+            val = max(0, min(MAX_RANGE_BIN - 1, int(self.txt_range_bin.text())))
+            selected_range_bin = val
+            for ch in CHANNELS:
+                with ch.micro_lock:
+                    ch.micro_doppler_buffer.clear()
+            print(f"Range bin set to: {val} (all channel MD buffers cleared)")
+        except ValueError:
+            print("Invalid range bin")
+
+    def toggle_micro_doppler(self):
+        global show_micro_doppler
+        show_micro_doppler = self.btn_md.isChecked()
+        self.btn_md.setText(f"Micro-Doppler: {'ON' if show_micro_doppler else 'OFF'}")
+
+    def apply_alignment(self):
+        try:
+            send_alignment_command(int(self.txt_delay.text()))
+        except ValueError:
+            print("Invalid alignment value")
+
+    def set_strd(self):
+        send_strd_command(self.txt_strd.text())
+
+    def set_tx_gain(self):
+        send_tx_gain_command(self.txt_tx_gain.text())
+
+    def set_rx_gain(self):
+        send_rx_gain_command(self.txt_rx_gain.text())
+
+    def set_center_freq(self):
+        try:
+            freq_ghz = float(self.txt_center_freq_ghz.text())
+            if freq_ghz <= 0.0:
+                raise ValueError
+            self.center_freq_hz = freq_ghz * 1e9
+            print(f"AoA center frequency set to {freq_ghz:.6f} GHz")
+            self.update_phase_probe_text()
+        except ValueError:
+            print(f"Invalid center frequency: {self.txt_center_freq_ghz.text()}")
+            self.txt_center_freq_ghz.setText(f"{self.center_freq_hz / 1e9:.6f}")
+
+    def calibrate_phase_bias(self):
+        if len(CHANNELS) < 2:
+            self.lbl_aoa_status.setText("AoA: unavailable (need >=2 channels)")
+            print("Calibration skipped: need >=2 channels")
+            return
+        phase_result = self._compute_phase_vectors()
+        if phase_result is None:
+            self.lbl_aoa_status.setText("AoA: calibration failed (sync/click not ready)")
+            print("Calibration skipped: phase vector not ready")
+            return
+
+        _, r_idx, doppler_bin, phase_raw, _ = phase_result
+        self.phase_bias_per_channel = phase_raw.astype(np.float64, copy=True)
+        self.phase_bias_per_channel[0] = 0.0
+        self.phase_calibrated = True
+        print(
+            f"Phase calibrated at frame {self.synced_frame_id}, R={r_idx}, D={doppler_bin:+.0f}, "
+            f"bias(rad, CH1-ref)={np.array2string(self.phase_bias_per_channel, precision=3, separator=',')}"
+        )
+        self.update_phase_probe_text()
+
+    def _sync_phase_frame(self):
+        self.phase_ready = False
+        self.synced_frame_id = None
+        self.synced_rd_complex = None
+
+        if len(CHANNELS) < 2:
+            return
+
+        common_frame_ids = None
+        for ch_cache in phase_sync_cache:
+            if not ch_cache:
+                common_frame_ids = set()
+                break
+            ch_ids = set(ch_cache.keys())
+            if common_frame_ids is None:
+                common_frame_ids = ch_ids
+            else:
+                common_frame_ids &= ch_ids
+            if not common_frame_ids:
+                break
+
+        if not common_frame_ids:
+            return
+
+        synced_frame_id = int(max(common_frame_ids))
+        rd_complex_list = []
+        ref_shape = None
+        for ch_id in range(len(CHANNELS)):
+            rd_complex = phase_sync_cache[ch_id].get(synced_frame_id)
+            if rd_complex is None:
+                return
+            if ref_shape is None:
+                ref_shape = rd_complex.shape
+            elif rd_complex.shape != ref_shape:
+                return
+            rd_complex_list.append(rd_complex)
+
+        self.phase_ready = True
+        self.synced_frame_id = synced_frame_id
+        self.synced_rd_complex = rd_complex_list
+        trim_phase_cache(synced_frame_id - 8)
+
+    def _compute_phase_vectors(self):
+        if (
+            not self.phase_ready
+            or self.synced_rd_complex is None
+            or self.clicked_range_idx is None
+            or self.clicked_doppler_idx is None
+        ):
+            return None
+
+        rd_ref = self.synced_rd_complex[0]
+        if rd_ref is None or rd_ref.size == 0:
+            return None
+
+        rows, cols = rd_ref.shape
+        d_idx = int(np.clip(self.clicked_doppler_idx, 0, rows - 1))
+        r_idx = int(np.clip(self.clicked_range_idx, 0, cols - 1))
+        doppler_bin = self.rd_doppler_min + d_idx
+
+        z = np.asarray([rd[d_idx, r_idx] for rd in self.synced_rd_complex], dtype=np.complex64)
+        phase_rel = np.angle(z * np.conj(z[0]))
+        phase_raw = np.unwrap(phase_rel.astype(np.float64))
+
+        if self.phase_bias_per_channel.shape[0] != len(CHANNELS):
+            self.phase_bias_per_channel = np.zeros(len(CHANNELS), dtype=np.float64)
+            self.phase_calibrated = False
+        phase_comp = phase_raw - self.phase_bias_per_channel
+        return d_idx, r_idx, doppler_bin, phase_raw, phase_comp
+
+    def _update_phase_curve_plot(self):
+        if len(CHANNELS) < 2:
+            self.phase_curve_raw_item.setData([], [])
+            self.phase_curve_comp_item.setData([], [])
+            return
+        if self.phase_curve_raw is None:
+            self.phase_curve_raw_item.setData([], [])
+            self.phase_curve_comp_item.setData([], [])
+            return
+
+        x = np.arange(1, len(CHANNELS) + 1, dtype=np.float64)
+        self.phase_curve_raw_item.setData(x, self.phase_curve_raw)
+        if self.phase_calibrated and self.phase_curve_comp is not None:
+            self.phase_curve_comp_item.setData(x, self.phase_curve_comp)
+        else:
+            self.phase_curve_comp_item.setData([], [])
+        self.phase_curve_plot.setXRange(0.5, len(CHANNELS) + 0.5, padding=0.0)
+
+    def _estimate_aoa_from_phase(self, phase_values):
+        if phase_values is None or len(phase_values) < 2 or self.center_freq_hz <= 0.0:
+            return None, None
+        x = np.arange(len(phase_values), dtype=np.float64)
+        try:
+            slope = float(np.polyfit(x, phase_values, 1)[0])
+        except Exception:
+            return None, None
+        wavelength = C_LIGHT_MPS / self.center_freq_hz
+        sin_theta = np.clip(slope * wavelength / (2.0 * np.pi * ANTENNA_SPACING_M), -1.0, 1.0)
+        aoa_deg = float(np.degrees(np.arcsin(sin_theta)))
+        return aoa_deg, slope
+
+    def toggle_mti(self):
+        global enable_mti
+        enable_mti = not enable_mti
+        self.update_toggle_style(self.btn_mti, enable_mti)
+        send_mti_command(enable_mti)
+
+    def toggle_range_win(self):
+        global enable_range_window
+        enable_range_window = not enable_range_window
+        self.update_toggle_style(self.btn_range_win, enable_range_window)
+
+    def toggle_doppler_win(self):
+        global enable_doppler_window
+        enable_doppler_window = not enable_doppler_window
+        self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
+
+    def save_raw(self):
+        ch = self._get_display_channel_runtime()
+        if ch and 'raw' in ch.current_display_data:
+            self._save_mat('raw_frame', ch.current_display_data['raw'], "raw")
+
+    def save_rd(self):
+        ch = self._get_display_channel_runtime()
+        if ch and 'rd' in ch.current_display_data:
+            self._save_mat('rd_map', ch.current_display_data['rd'], "rd")
+
+    def save_md(self):
+        ch = self._get_display_channel_runtime()
+        if ch and 'md' in ch.current_display_data and ch.current_display_data.get('md') is not None:
+            self._save_mat('md_map', ch.current_display_data['md'], "md")
+
+    def _save_mat(self, key, data, suffix):
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"./capture/capture_{suffix}_{ts}.mat"
+        try:
+            os.makedirs("./capture", exist_ok=True)
+            sio.savemat(fname, {key: data})
+            print(f"Saved {suffix} to {fname}")
+        except Exception as e:
+            print(f"Error saving {suffix}: {e}")
+
+    def on_rd_mouse_clicked(self, event):
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+
+        ch = self._get_display_channel_runtime()
+        if ch is None:
+            return
+
+        rd_data = ch.current_display_data.get('rd')
+        if rd_data is None or rd_data.size == 0:
+            return
+
+        scene_pos = event.scenePos()
+        if not self.rd_plot.sceneBoundingRect().contains(scene_pos):
+            return
+
+        mouse_point = self.rd_plot.plotItem.vb.mapSceneToView(scene_pos)
+        x_val = float(mouse_point.x())
+        y_val = float(mouse_point.y())
+
+        rows, cols = rd_data.shape  # rows=doppler bins, cols=range bins
+        doppler_idx = int(np.clip(round(x_val - self.rd_doppler_min), 0, rows - 1))
+        range_idx = int(np.clip(round(y_val), 0, cols - 1))
+        doppler_bin = self.rd_doppler_min + doppler_idx
+
+        self.clicked_range_idx = range_idx
+        self.clicked_doppler_idx = doppler_idx
+        self.rd_click_marker.setData([doppler_bin], [range_idx])
+
+        print(f"Clicked RD point: R={range_idx}, D={doppler_bin:+.0f}")
+        self.update_phase_probe_text()
+
+    def update_phase_status(self):
+        if len(CHANNELS) < 2:
+            self.phase_ready = False
+            self.synced_frame_id = None
+            self.synced_rd_complex = None
+            self.lbl_phase_sync.setText("Phase Sync: unavailable (need >=2 channels)")
+            self.lbl_aoa_status.setText("AoA: unavailable (need >=2 channels)")
+            return
+
+        frame_tags = ", ".join([f"CH{i + 1}={CHANNELS[i].last_frame_id}" for i in range(len(CHANNELS))])
+        if not self.phase_ready or self.synced_frame_id is None or self.synced_rd_complex is None:
+            self.lbl_phase_sync.setText(f"Phase Sync: waiting same frame across {len(CHANNELS)} channels ({frame_tags})")
+            if self.phase_calibrated:
+                self.lbl_aoa_status.setText("AoA: waiting phase sync (calibrated)")
+            else:
+                self.lbl_aoa_status.setText("AoA: waiting phase sync (not calibrated)")
+            return
+
+        self.lbl_phase_sync.setText(
+            f"Phase Sync: locked frame {self.synced_frame_id} across {len(CHANNELS)} channels"
+        )
+
+    def update_phase_probe_text(self):
+        if len(CHANNELS) < 2:
+            self.phase_curve_raw = None
+            self.phase_curve_comp = None
+            self._update_phase_curve_plot()
+            self.lbl_phase_clicked.setText("Phase@Clicked: unavailable (need >=2 channels)")
+            self.lbl_aoa_status.setText("AoA: unavailable (need >=2 channels)")
+            return
+
+        if self.clicked_range_idx is None or self.clicked_doppler_idx is None:
+            self.phase_curve_raw = None
+            self.phase_curve_comp = None
+            self._update_phase_curve_plot()
+            self.lbl_phase_clicked.setText("Phase@Clicked: click RD map to query")
+            if self.phase_calibrated:
+                self.lbl_aoa_status.setText("AoA: calibrated; click RD map to query")
+            else:
+                self.lbl_aoa_status.setText("AoA: not calibrated; click RD map then calibrate")
+            return
+
+        phase_result = self._compute_phase_vectors()
+        if phase_result is None:
+            self.phase_curve_raw = None
+            self.phase_curve_comp = None
+            self._update_phase_curve_plot()
+            self.lbl_phase_clicked.setText("Phase@Clicked: waiting same-frame data across all channels")
+            if self.phase_calibrated:
+                self.lbl_aoa_status.setText("AoA: waiting same-frame phase (calibrated)")
+            else:
+                self.lbl_aoa_status.setText("AoA: waiting same-frame phase")
+            return
+
+        _, r_idx, doppler_bin, phase_raw, phase_comp = phase_result
+        self.phase_curve_raw = phase_raw
+        self.phase_curve_comp = phase_comp
+        self._update_phase_curve_plot()
+
+        disp_idx = max(0, min(display_channel, len(CHANNELS) - 1))
+        ph_raw_disp = float(phase_raw[disp_idx])
+        ph_comp_disp = float(phase_comp[disp_idx])
+        aoa_deg, slope = self._estimate_aoa_from_phase(phase_comp)
+
+        calib_tag = "calibrated" if self.phase_calibrated else "uncalibrated"
+        self.lbl_phase_clicked.setText(
+            f"Phase@R={r_idx},D={doppler_bin:+.0f},F={self.synced_frame_id}: "
+            f"CH{disp_idx + 1} raw={ph_raw_disp:+.3f}, comp={ph_comp_disp:+.3f} rad ({calib_tag})"
+        )
+
+        if aoa_deg is None or slope is None:
+            self.lbl_aoa_status.setText("AoA: estimation unavailable")
+            return
+        self.lbl_aoa_status.setText(
+            f"AoA@R={r_idx},D={doppler_bin:+.0f}: {aoa_deg:+.2f} deg, slope={slope:+.4f} rad/ch, "
+            f"fc={self.center_freq_hz/1e9:.3f} GHz ({calib_tag})"
+        )
+
+    def update_plots(self):
+        updated_any = False
+
+        # Pull latest display item from each channel
+        for ch in CHANNELS:
+            latest = None
+            while not ch.display_queue.empty():
+                latest = ch.display_queue.get()
+
+            if latest is not None:
+                ch.current_display_data = latest
+                ch.last_frame_id = latest.get('frame_id', ch.last_frame_id)
+                cache_phase_frame(ch.ch_id, latest.get('frame_id', -1), latest.get('rd_complex'))
+                if 'dsp_time' in latest:
+                    self.total_dsp_time += latest['dsp_time']
+                updated_any = True
+
+        self._sync_phase_frame()
+
+        # Update phase status text only (no heavy compute in UI thread).
+        self.update_phase_status()
+
+        # Update currently displayed channel
+        ch = self._get_display_channel_runtime()
+        if ch is None:
+            self.lbl_sender.setText("Sender: N/A")
+            self.lbl_buffer.setText("MD Buffer: N/A")
+            self.rd_click_marker.setData([], [])
+        else:
+            latest_disp = ch.current_display_data
+            rd_data = latest_disp.get('rd')
+            md_data = latest_disp.get('md')
+
+            if rd_data is not None:
+                self.rd_img.setImage(rd_data, autoLevels=False)
+                rows, cols = rd_data.shape  # rows=doppler, cols=range
+                self.rd_doppler_min = -0.5 * float(rows)
+                self.rd_doppler_span = float(rows)
+                self.rd_img.setRect(QtCore.QRectF(self.rd_doppler_min, 0.0, self.rd_doppler_span, float(cols)))
+                if self.clicked_range_idx is not None and self.clicked_doppler_idx is not None:
+                    d_idx = int(np.clip(self.clicked_doppler_idx, 0, rows - 1))
+                    r_idx = int(np.clip(self.clicked_range_idx, 0, cols - 1))
+                    doppler_bin = self.rd_doppler_min + d_idx
+                    self.rd_click_marker.setData([doppler_bin], [r_idx])
+            if md_data is not None:
+                self.md_img.setImage(md_data, autoLevels=False)
+                md_extent = latest_disp.get('md_extent')
+                if md_extent is not None and len(md_extent) == 4:
+                    x0, x1, y0, y1 = [float(v) for v in md_extent]
+                    self.md_img.setRect(
+                        QtCore.QRectF(x0, y0, max(1e-6, x1 - x0), max(1e-6, y1 - y0))
+                    )
+
+            with ch.sender_lock:
+                if ch.sender_ip:
+                    self.lbl_sender.setText(
+                        f"Sender(CH{ch.ch_id + 1}): {ch.sender_ip}:{ch.control_port} | Frame: {ch.last_frame_id}"
+                    )
+                else:
+                    self.lbl_sender.setText(f"Sender(CH{ch.ch_id + 1}): Detecting...")
+
+            with ch.micro_lock:
+                self.lbl_buffer.setText(f"MD Buffer(CH{ch.ch_id + 1}): {len(ch.micro_doppler_buffer)}/{BUFFER_LENGTH}")
+
+        self.update_phase_probe_text()
+        self.refresh_display_button_text()
+
+        # Queue status
+        queue_states = " ".join(
+            [f"CH{i + 1}:{CHANNELS[i].raw_frame_queue.qsize()}/{CHANNELS[i].display_queue.qsize()}" for i in range(len(CHANNELS))]
+        )
+        self.lbl_queue.setText(f"Q(raw/disp) {queue_states}")
+
+        # FPS + DSP time
+        if updated_any:
+            self.frame_count += 1
+
+        current_time = time.time()
+        elapsed = current_time - self.last_update_time
+        if elapsed > 0.5:
+            fps = self.frame_count / elapsed
+            avg_dsp = (self.total_dsp_time / self.frame_count * 1000) if self.frame_count > 0 else 0.0
+            self.lbl_fps.setText(f"FPS: {fps:.1f} | DSP: {avg_dsp:.1f}ms")
+            self.frame_count = 0
+            self.total_dsp_time = 0.0
+            self.last_update_time = current_time
+
+    def closeEvent(self, event):
+        global running
+        running = False
+        print("Closing application...")
+        event.accept()
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

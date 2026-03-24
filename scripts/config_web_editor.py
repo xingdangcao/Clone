@@ -1,0 +1,1037 @@
+from __future__ import annotations
+
+import argparse
+import atexit
+import collections
+import copy
+import json
+import os
+import re
+import signal
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+import yaml
+
+
+HTML_TEMPLATE_PATH = Path(__file__).with_suffix(".html")
+
+
+def load_html_page() -> str:
+    return HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+SECTION_RE = re.compile(r"^#\s*=+\s*(.*?)\s*=+\s*$")
+
+
+@dataclass(frozen=True)
+class TabConfig:
+    name: str
+    label: str
+    yaml_path: Path
+    cwd: Path
+    default_command: str
+    presets: tuple[dict[str, str], ...]
+    sample_candidates: tuple[Path, ...]
+
+
+def split_inline_comment(text: str) -> tuple[str, str]:
+    if "#" not in text:
+        return text.rstrip(), ""
+    value, comment = text.split("#", 1)
+    return value.rstrip(), comment.strip()
+
+
+def detect_kind(value: Any, fallback: str = "string") -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, list):
+        return "flow_list"
+    if isinstance(value, str):
+        return "string"
+    return fallback
+
+
+def display_unit_meta(key: str) -> tuple[float, str] | None:
+    if key == "sample_rate":
+        return (1e6, "MHz")
+    if key == "bandwidth":
+        return (1e6, "MHz")
+    if key == "center_freq":
+        return (1e9, "GHz")
+    return None
+
+
+def display_comment_override(key: str, comment: str) -> str:
+    overrides = {
+        "sample_rate": "Baseband sample rate. Displayed in MHz, stored in Hz.",
+        "bandwidth": "Analog bandwidth. Displayed in MHz, stored in Hz.",
+        "center_freq": "RF center frequency. Displayed in GHz, stored in Hz.",
+    }
+    return overrides.get(key, comment)
+
+
+def format_display_value(key: str, value: Any) -> str:
+    meta = display_unit_meta(key)
+    if meta is None:
+        return "" if value is None else str(value)
+    scale, _unit = meta
+    if value is None or value == "":
+        return ""
+    try:
+        scaled = float(value) / scale
+    except Exception:
+        return str(value)
+    if abs(scaled - round(scaled)) < 1e-9:
+        return str(int(round(scaled)))
+    return f"{scaled:.6f}".rstrip("0").rstrip(".")
+
+
+def parse_display_value(key: str, text: str, kind: str) -> Any:
+    meta = display_unit_meta(key)
+    if meta is None:
+        return coerce_scalar(text, kind)
+    scale, _unit = meta
+    raw = text.strip()
+    if not raw:
+        return 0.0 if kind == "float" else 0
+    value_hz = float(raw) * scale
+    if kind == "int":
+        return int(round(value_hz))
+    return value_hz
+
+
+def int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def parse_layout(text: str) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = [{"title": "General", "fields": []}]
+    current = sections[0]
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped:
+            i += 1
+            continue
+        match = SECTION_RE.match(stripped)
+        if match:
+            title = match.group(1).strip() or "General"
+            if current["fields"]:
+                current = {"title": title, "fields": []}
+                sections.append(current)
+            else:
+                current["title"] = title
+            i += 1
+            continue
+        if stripped.startswith("#") or raw.startswith(" "):
+            i += 1
+            continue
+        if ":" not in raw:
+            i += 1
+            continue
+
+        key, rest = raw.split(":", 1)
+        key = key.strip()
+        value_part, comment = split_inline_comment(rest)
+        value_part = value_part.strip()
+
+        if key == "sensing_rx_channels":
+            item_fields: list[dict[str, Any]] = []
+            seen_item_keys: set[str] = set()
+            j = i + 1
+            while j < len(lines):
+                sub_raw = lines[j]
+                sub_stripped = sub_raw.strip()
+                if not sub_stripped:
+                    j += 1
+                    continue
+                if not sub_raw.startswith(" "):
+                    break
+                if sub_stripped.startswith("#"):
+                    j += 1
+                    continue
+                trimmed = sub_stripped[2:].strip() if sub_stripped.startswith("- ") else sub_stripped
+                if ":" in trimmed:
+                    item_key, item_rest = trimmed.split(":", 1)
+                    item_key = item_key.strip()
+                    _, item_comment = split_inline_comment(item_rest)
+                    if item_key not in seen_item_keys:
+                        item_fields.append({
+                            "key": item_key,
+                            "comment": item_comment,
+                        })
+                        seen_item_keys.add(item_key)
+                j += 1
+            current["fields"].append({
+                "type": "mapping_list",
+                "key": key,
+                "comment": comment,
+                "item_fields": item_fields,
+            })
+            i = j
+            continue
+
+        if key == "cpu_cores" and not value_part:
+            j = i + 1
+            while j < len(lines):
+                sub_raw = lines[j]
+                sub_stripped = sub_raw.strip()
+                if not sub_stripped:
+                    j += 1
+                    continue
+                if not sub_raw.startswith(" "):
+                    break
+                j += 1
+            current["fields"].append({
+                "type": "cpu_cores",
+                "key": key,
+                "comment": comment,
+            })
+            i = j
+            continue
+
+        current["fields"].append({
+            "type": "flow_list" if value_part.startswith("[") else "scalar",
+            "key": key,
+            "comment": comment,
+        })
+        i += 1
+
+    return [section for section in sections if section["fields"]]
+
+
+def coerce_scalar(text: str, kind: str) -> Any:
+    text = text.strip()
+    if kind == "bool":
+        return text.lower() == "true"
+    if kind == "int":
+        return int(text) if text else 0
+    if kind == "float":
+        return float(text) if text else 0.0
+    return text
+
+
+def coerce_flow_list(text: str, item_kind: str) -> list[Any]:
+    raw = text.strip()
+    if not raw:
+        return []
+    items = [item.strip() for item in raw.split(",")]
+    return [coerce_scalar(item, item_kind) for item in items if item]
+
+
+def quote_string(value: str) -> str:
+    if value == "" or any(ch in value for ch in [":", "#", ",", "[", "]", "{", "}", " "]):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def format_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    if value is None:
+        return '""'
+    return quote_string(str(value))
+
+
+def format_flow_list(values: list[Any]) -> str:
+    return "[" + ", ".join(format_scalar(v) for v in values) + "]"
+
+
+def cpu_binding_rows(tab_name: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if tab_name == "modulator":
+        rows.extend([
+            {"comment": "idx0 (hint 0): _tx_proc", "label": "_tx_proc"},
+            {"comment": "idx1 (hint 1): _modulation_proc", "label": "_modulation_proc"},
+            {"comment": "idx2 (hint 2): _data_ingest_proc", "label": "_data_ingest_proc"},
+        ])
+        count = max(0, int_or_zero(data.get("sensing_rx_channel_count", 0)))
+        for ch in range(count):
+            hint = len(rows)
+            rows.append({
+                "comment": f"idx{hint} (hint {hint}): SensingChannel::_rx_loop (CH{ch})",
+                "label": f"SensingChannel::_rx_loop (CH{ch})",
+            })
+            hint = len(rows)
+            rows.append({
+                "comment": f"idx{hint} (hint {hint}): SensingChannel::_sensing_loop (CH{ch})",
+                "label": f"SensingChannel::_sensing_loop (CH{ch})",
+            })
+    else:
+        rows.extend([
+            {"comment": "idx0 (hint 0): rx_proc", "label": "rx_proc"},
+            {"comment": "idx1 (hint 1): process_proc", "label": "process_proc"},
+            {"comment": "idx2 (hint 2): sensing_process_proc", "label": "sensing_process_proc"},
+            {"comment": "idx3 (hint 3): bit_processing_proc", "label": "bit_processing_proc"},
+        ])
+    rows.append({"comment": "idx_last: main thread affinity", "label": "main thread affinity"})
+
+    cpu_values = data.get("cpu_cores", []) or []
+    values = [int_or_zero(v) for v in cpu_values]
+    while len(rows) < len(values):
+        slot = len(rows)
+        rows.append({"comment": f"extra[{slot}]", "label": f"extra[{slot}]"})
+    for index, row in enumerate(rows):
+        row["cpu"] = values[index] if index < len(values) else None
+    return rows
+
+
+def unique_cpu_spec(values: list[int]) -> str:
+    unique = sorted({int(v) for v in values})
+    return ",".join(str(v) for v in unique)
+
+
+def append_missing_layout_fields(
+    layout: list[dict[str, Any]],
+    sample_candidates: tuple[Path, ...],
+    required_keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    existing = {field["key"] for section in layout for field in section["fields"]}
+    missing = [key for key in required_keys if key not in existing]
+    if not missing:
+        return layout
+
+    sample_layout: list[dict[str, Any]] = []
+    for candidate in sample_candidates:
+        if candidate.exists():
+            sample_layout = parse_layout(candidate.read_text(encoding="utf-8"))
+            break
+    if not sample_layout:
+        return layout
+
+    layout_copy = copy.deepcopy(layout)
+    for key in missing:
+        inserted = False
+        for sample_section in sample_layout:
+            for sample_field in sample_section["fields"]:
+                if sample_field["key"] != key:
+                    continue
+                for target_section in layout_copy:
+                    if target_section["title"] == sample_section["title"]:
+                        target_section["fields"].append(copy.deepcopy(sample_field))
+                        inserted = True
+                        break
+                if not inserted:
+                    layout_copy.append({
+                        "title": sample_section["title"],
+                        "fields": [copy.deepcopy(sample_field)],
+                    })
+                    inserted = True
+                break
+            if inserted:
+                break
+    return layout_copy
+
+
+def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Path]:
+    exists = path.exists()
+    source = path if exists else next((candidate for candidate in fallback_paths if candidate.exists()), path)
+    text = source.read_text(encoding="utf-8") if source.exists() else ""
+    data = yaml.safe_load(text) if text.strip() else {}
+    if not isinstance(data, dict):
+        data = {}
+    layout = parse_layout(text)
+    if "sensing_rx_channels" in data and not isinstance(data["sensing_rx_channels"], list):
+        data["sensing_rx_channels"] = []
+    if "cpu_cores" in data and not isinstance(data["cpu_cores"], list):
+        data["cpu_cores"] = []
+    layout = append_missing_layout_fields(layout, fallback_paths, ("sensing_rx_channels",))
+    known_keys = {field["key"] for section in layout for field in section["fields"]}
+    extra_keys = [key for key in data.keys() if key not in known_keys]
+    if extra_keys:
+        layout.append({
+            "title": "Other",
+            "fields": [{"type": "scalar", "key": key, "comment": ""} for key in extra_keys],
+        })
+    return data, layout, exists, source
+
+
+def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[str, Any]]) -> dict[str, Any]:
+    sections: list[dict[str, Any]] = []
+    for section in layout:
+        section_payload = {"title": section["title"], "fields": []}
+        for field in section["fields"]:
+            key = field["key"]
+            if field["type"] == "cpu_cores":
+                section_payload["fields"].append({
+                    "type": "cpu_cores",
+                    "key": key,
+                    "comment": field.get("comment", ""),
+                })
+                continue
+            if field["type"] == "mapping_list":
+                items = copy.deepcopy(data.get(key, []) or [])
+                if not isinstance(items, list):
+                    items = []
+                item_fields = []
+                for item_field in field["item_fields"]:
+                    sample_value = ""
+                    for item in items:
+                        if isinstance(item, dict) and item_field["key"] in item:
+                            sample_value = item[item_field["key"]]
+                            break
+                    item_fields.append({
+                        "key": item_field["key"],
+                        "comment": item_field.get("comment", ""),
+                        "display_comment": display_comment_override(item_field["key"], item_field.get("comment", "")),
+                        "kind": detect_kind(sample_value),
+                    })
+                section_payload["fields"].append({
+                    "type": "mapping_list",
+                    "key": key,
+                    "comment": field.get("comment", ""),
+                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "item_fields": item_fields,
+                    "items": items,
+                })
+                continue
+
+            value = data.get(key)
+            if field["type"] == "flow_list":
+                item_kind = detect_kind(value[0], "int") if isinstance(value, list) and value else "int"
+                section_payload["fields"].append({
+                    "type": "flow_list",
+                    "key": key,
+                    "comment": field.get("comment", ""),
+                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "kind": item_kind,
+                    "value_text": ", ".join(str(v) for v in (value or [])),
+                })
+                continue
+
+            kind = detect_kind(value)
+            unit_meta = display_unit_meta(key)
+            section_payload["fields"].append({
+                "type": "scalar",
+                "key": key,
+                "comment": field.get("comment", ""),
+                "display_comment": display_comment_override(key, field.get("comment", "")),
+                "kind": kind,
+                "value": value,
+                "value_text": format_display_value(key, value),
+                "display_unit": unit_meta[1] if unit_meta is not None else "",
+            })
+        sections.append(section_payload)
+
+    cpu_values = [int_or_zero(v) for v in data.get("cpu_cores", []) or []]
+    return {
+        "sections": sections,
+        "cpu_cores": {
+            "values": cpu_values,
+            "rows": cpu_binding_rows(tab_name, data),
+        },
+    }
+
+
+def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any]) -> str:
+    lines: list[str] = []
+    cpu_rows = cpu_binding_rows(tab_name, data)
+    cpu_values = [row.get("cpu") for row in cpu_rows if row.get("cpu") is not None]
+    data["cpu_cores"] = [int(v) for v in cpu_values]
+
+    for section in layout:
+        lines.append(f"# ===== {section['title']} =====")
+        for field in section["fields"]:
+            key = field["key"]
+            comment = field.get("comment", "")
+            suffix = f"  # {comment}" if comment else ""
+            if field["type"] == "cpu_cores":
+                values = data.get("cpu_cores", []) or []
+                if not values:
+                    lines.append(f"{key}: []{suffix}")
+                else:
+                    lines.append(f"{key}:{suffix}")
+                    for row in cpu_binding_rows(tab_name, data):
+                        if row.get("cpu") is None:
+                            continue
+                        lines.append(f"  - {row['cpu']}  # {row['comment']}")
+                continue
+
+            if field["type"] == "mapping_list":
+                items = data.get(key, []) or []
+                if not items:
+                    lines.append(f"{key}: []{suffix}")
+                    continue
+                lines.append(f"{key}:{suffix}")
+                item_fields = field["item_fields"]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    for index, item_field in enumerate(item_fields):
+                        item_key = item_field["key"]
+                        item_comment = item_field.get("comment", "")
+                        item_suffix = f"  # {item_comment}" if item_comment else ""
+                        prefix = "  - " if index == 0 else "    "
+                        value = item.get(item_key, "")
+                        lines.append(f"{prefix}{item_key}: {format_scalar(value)}{item_suffix}")
+                continue
+
+            value = data.get(key)
+            if field["type"] == "flow_list":
+                lines.append(f"{key}: {format_flow_list(value or [])}{suffix}")
+            else:
+                lines.append(f"{key}: {format_scalar(value)}{suffix}")
+        lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload: dict[str, Any], current_data: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(current_data)
+    scalars = payload.get("scalars", {})
+    mapping_lists = payload.get("mapping_lists", {})
+    cpu_values = payload.get("cpu_cores", [])
+    if not isinstance(scalars, dict):
+        raise RuntimeError("Invalid scalar payload.")
+    if not isinstance(mapping_lists, dict):
+        raise RuntimeError("Invalid mapping list payload.")
+
+    kind_map: dict[str, tuple[str, str]] = {}
+    mapping_layouts: dict[str, list[dict[str, Any]]] = {}
+    for section in layout:
+        for field in section["fields"]:
+            if field["type"] == "mapping_list":
+                mapping_layouts[field["key"]] = field["item_fields"]
+            elif field["type"] == "flow_list":
+                existing = current_data.get(field["key"], [])
+                item_kind = detect_kind(existing[0], "int") if isinstance(existing, list) and existing else "int"
+                kind_map[field["key"]] = ("flow_list", item_kind)
+            elif field["type"] == "scalar":
+                kind_map[field["key"]] = (field.get("kind") or detect_kind(current_data.get(field["key"])), "")
+
+    for key, raw in scalars.items():
+        field_kind, extra = kind_map.get(key, ("string", ""))
+        if field_kind == "flow_list":
+            result[key] = coerce_flow_list(str(raw), extra)
+        elif field_kind == "bool":
+            result[key] = bool(raw)
+        else:
+            result[key] = parse_display_value(key, str(raw), field_kind)
+
+    for key, items in mapping_lists.items():
+        item_layout = mapping_layouts.get(key, [])
+        if not isinstance(items, list):
+            raise RuntimeError(f"Invalid mapping list for {key}.")
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized_item: dict[str, Any] = {}
+            for item_field in item_layout:
+                item_key = item_field["key"]
+                kind = item_field.get("kind") or detect_kind(item.get(item_key))
+                raw = item.get(item_key, "")
+                if kind == "bool":
+                    normalized_item[item_key] = bool(raw)
+                else:
+                    normalized_item[item_key] = coerce_scalar(str(raw), kind)
+            normalized_items.append(normalized_item)
+        result[key] = normalized_items
+
+    if not isinstance(cpu_values, list):
+        raise RuntimeError("Invalid cpu_cores payload.")
+    result["cpu_cores"] = [int_or_zero(v) for v in cpu_values if str(v).strip() != ""]
+    if tab_name == "modulator":
+        count = max(0, int_or_zero(result.get("sensing_rx_channel_count", 0)))
+        channels = result.get("sensing_rx_channels", []) or []
+        while len(channels) < count:
+            template = copy.deepcopy(channels[0]) if channels else {}
+            channels.append(template)
+        while len(channels) > count:
+            channels.pop()
+        result["sensing_rx_channels"] = channels
+    return result
+
+
+def privileged_command(command: list[str], sudo_password: str = "") -> tuple[list[str], str | None]:
+    if os.geteuid() == 0:
+        return command, None
+    if sudo_password:
+        return ["sudo", "-S", "-p", ""] + command, sudo_password + "\n"
+    return ["sudo", "-n"] + command, None
+
+
+class ProcessController:
+    def __init__(self, tab_name: str, cwd: Path, default_command: str, isolate_script: Path) -> None:
+        self._tab_name = tab_name
+        self._cwd = cwd
+        self._default_command = default_command
+        self._current_command = default_command
+        self._process: subprocess.Popen[str] | None = None
+        self._returncode: int | None = None
+        self._logs: collections.deque[str] = collections.deque(maxlen=4000)
+        self._reader_thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._cpu_spec = ""
+        self._unit_name = f"openisac-{tab_name}"
+        self._isolate_script = isolate_script
+        self._isolate_enabled = True
+
+    def _cleanup_unit(self, sudo_password: str = "") -> None:
+        self._run_checked(
+            ["systemctl", "stop", self._unit_name],
+            ignore_failure=True,
+            sudo_password=sudo_password,
+        )
+        self._run_checked(
+            ["systemctl", "reset-failed", self._unit_name],
+            ignore_failure=True,
+            sudo_password=sudo_password,
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            running = self._process is not None and self._process.poll() is None
+            if self._process is not None and not running:
+                self._returncode = self._process.poll()
+                self._process = None
+            pid = self._process.pid if self._process is not None else None
+            return {
+                "ok": True,
+                "running": running,
+                "pid": pid,
+                "returncode": self._returncode,
+                "cwd": str(self._cwd),
+                "command": self._current_command,
+                "cpu_spec": self._cpu_spec,
+                "isolate_enabled": self._isolate_enabled,
+                "unit_name": self._unit_name,
+                "logs": list(self._logs),
+            }
+
+    def start(
+        self,
+        command: str,
+        cpu_values: list[int],
+        isolate_cpu: bool,
+        override_cpu_spec: str | None = None,
+        sudo_password: str = "",
+    ) -> dict[str, Any]:
+        command = command.strip() or self._default_command
+        default_cpu_spec = unique_cpu_spec(cpu_values)
+        cpu_spec = (override_cpu_spec or "").strip() if override_cpu_spec else default_cpu_spec
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError(f"{self._tab_name} is already running.")
+            self._logs.clear()
+            self._logs.append(f"$ {command}")
+            self._returncode = None
+            self._current_command = command
+            self._cpu_spec = cpu_spec if isolate_cpu else ""
+            self._isolate_enabled = isolate_cpu
+
+        if isolate_cpu and cpu_spec:
+            self._run_checked(
+                [str(self._isolate_script), cpu_spec],
+                "CPU isolation setup failed",
+                sudo_password=sudo_password,
+            )
+        self._cleanup_unit(sudo_password=sudo_password)
+        run_cmd = [
+            "systemd-run",
+            "--unit",
+            self._unit_name,
+            "--collect",
+            "--slice=rt-workload.slice",
+            "--pipe",
+            "--quiet",
+            "-p",
+            f"WorkingDirectory={self._cwd}",
+        ]
+        if isolate_cpu and cpu_spec:
+            run_cmd += ["-p", f"AllowedCPUs={cpu_spec}"]
+        run_cmd += ["/bin/bash", "-lc", command]
+
+        with self._lock:
+            self._process = self._popen_checked(run_cmd, sudo_password)
+            self._reader_thread = threading.Thread(target=self._read_output, args=(self._process,), daemon=True)
+            self._reader_thread.start()
+        return self.snapshot()
+
+    def stop(self, sudo_password: str = "") -> dict[str, Any]:
+        with self._lock:
+            process = self._process
+            running = process is not None and process.poll() is None
+        self._cleanup_unit(sudo_password=sudo_password)
+        if process is not None:
+            for _ in range(30):
+                if process.poll() is not None:
+                    break
+                time.sleep(0.1)
+            if process.poll() is None:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as exc:
+                    raise RuntimeError("Failed to terminate privileged runtime client.") from exc
+        return self.snapshot()
+
+    def reset_isolation(self, sudo_password: str = "") -> dict[str, Any]:
+        self._run_checked(
+            [str(self._isolate_script), "reset"],
+            "CPU isolation reset failed",
+            sudo_password=sudo_password,
+        )
+        return self.snapshot()
+
+    def stop_if_running(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            return
+
+    def _read_output(self, process: subprocess.Popen[str]) -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            with self._lock:
+                self._logs.append(line.rstrip("\n"))
+        process.wait()
+        with self._lock:
+            self._returncode = process.returncode
+            if self._process is process:
+                self._process = None
+            self._logs.append(f"[manager] exited with code {process.returncode}")
+
+    def _popen_checked(self, command: list[str], sudo_password: str = "") -> subprocess.Popen[str]:
+        full_command, sudo_input = privileged_command(command, sudo_password)
+        process = subprocess.Popen(
+            full_command,
+            cwd=self._cwd,
+            stdin=subprocess.PIPE if sudo_input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            preexec_fn=os.setsid,
+        )
+        if sudo_input is not None and process.stdin is not None:
+            try:
+                process.stdin.write(sudo_input)
+                process.stdin.flush()
+            finally:
+                process.stdin.close()
+        return process
+
+    def _run_checked(
+        self,
+        command: list[str],
+        message: str = "",
+        ignore_failure: bool = False,
+        sudo_password: str = "",
+    ) -> None:
+        full_command, sudo_input = privileged_command(command, sudo_password)
+        result = subprocess.run(
+            full_command,
+            cwd=self._cwd,
+            input=sudo_input,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 or ignore_failure:
+            if result.stdout.strip():
+                with self._lock:
+                    self._logs.append(result.stdout.strip())
+            return
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError(f"{message or 'Command failed'}: {detail}")
+
+
+class ConfigEditorApp:
+    def __init__(self, repo_root: Path, build_dir: Path) -> None:
+        isolate_script = repo_root / "scripts" / "isolate_cpus.bash"
+        self.repo_root = repo_root
+        self.build_dir = build_dir
+        self.tabs: dict[str, TabConfig] = {
+            "modulator": TabConfig(
+                name="modulator",
+                label="Modulator",
+                yaml_path=build_dir / "Modulator.yaml",
+                cwd=build_dir,
+                default_command="./OFDMModulator",
+                presets=({"label": "CPU Modulator", "command": "./OFDMModulator"},),
+                sample_candidates=(
+                    repo_root / "config" / "Modulator_X310.yaml",
+                    repo_root / "config" / "Modulator_B210.yaml",
+                ),
+            ),
+            "demodulator": TabConfig(
+                name="demodulator",
+                label="Demodulator",
+                yaml_path=build_dir / "Demodulator.yaml",
+                cwd=build_dir,
+                default_command="./OFDMDemodulator",
+                presets=({"label": "CPU Demodulator", "command": "./OFDMDemodulator"},),
+                sample_candidates=(
+                    repo_root / "config" / "Demodulator_X310.yaml",
+                    repo_root / "config" / "Demodulator_B210.yaml",
+                ),
+            ),
+        }
+        self.processes = {
+            name: ProcessController(name, tab.cwd, tab.default_command, isolate_script)
+            for name, tab in self.tabs.items()
+        }
+
+    def tab_config(self, name: str) -> TabConfig:
+        try:
+            return self.tabs[name]
+        except KeyError as exc:
+            raise RuntimeError(f"Unknown tab '{name}'.") from exc
+
+    def load_config(self, name: str) -> dict[str, Any]:
+        tab = self.tab_config(name)
+        data, layout, exists, source = load_yaml_with_layout(tab.yaml_path, tab.sample_candidates)
+        mtime = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tab.yaml_path.stat().st_mtime))
+            if tab.yaml_path.exists()
+            else None
+        )
+        form_payload = build_form_payload(name, data, layout)
+        return {
+            "ok": True,
+            "path": str(tab.yaml_path),
+            "exists": exists,
+            "source_path": str(source),
+            "mtime": mtime,
+            **form_payload,
+        }
+
+    def save_config(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tab = self.tab_config(name)
+        current_data, layout, _, _ = load_yaml_with_layout(tab.yaml_path, tab.sample_candidates)
+        new_data = normalize_payload_data(name, layout, payload, current_data)
+        rendered = render_yaml(name, layout, new_data)
+        tab.yaml_path.parent.mkdir(parents=True, exist_ok=True)
+        tab.yaml_path.write_text(rendered, encoding="utf-8")
+        return self.load_config(name)
+
+    def process_snapshot(self, name: str) -> dict[str, Any]:
+        self.tab_config(name)
+        return self.processes[name].snapshot()
+
+    def process_start(
+        self,
+        name: str,
+        command: str,
+        isolate_cpu: bool,
+        isolate_cpu_spec: str | None = None,
+        sudo_password: str = "",
+    ) -> dict[str, Any]:
+        tab = self.tab_config(name)
+        data, _, _, _ = load_yaml_with_layout(tab.yaml_path, tab.sample_candidates)
+        cpu_values = [int_or_zero(v) for v in (data.get("cpu_cores", []) or [])]
+        return self.processes[name].start(command, cpu_values, isolate_cpu, isolate_cpu_spec, sudo_password)
+
+    def process_stop(self, name: str, sudo_password: str = "") -> dict[str, Any]:
+        self.tab_config(name)
+        return self.processes[name].stop(sudo_password)
+
+    def process_reset_isolation(self, name: str, sudo_password: str = "") -> dict[str, Any]:
+        self.tab_config(name)
+        return self.processes[name].reset_isolation(sudo_password)
+
+    def stop_all(self) -> None:
+        for controller in self.processes.values():
+            controller.stop_if_running()
+
+    def app_state_json(self) -> str:
+        payload = {
+            "build_dir": str(self.build_dir),
+            "tabs": {
+                name: {
+                    "label": tab.label,
+                    "default_command": tab.default_command,
+                    "presets": list(tab.presets),
+                }
+                for name, tab in self.tabs.items()
+            },
+        }
+        return json.dumps(payload, ensure_ascii=True)
+
+
+class ConfigEditorHandler(BaseHTTPRequestHandler):
+    server: "ConfigEditorServer"
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/":
+                self._serve_index()
+                return
+            if parsed.path == "/api/config":
+                name = self._require_name(parsed)
+                self._send_json(self.server.app.load_config(name))
+                return
+            if parsed.path == "/api/process":
+                name = self._require_name(parsed)
+                self._send_json(self.server.app.process_snapshot(name))
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+        except RuntimeError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            payload = self._read_json()
+            if parsed.path == "/api/config/save":
+                name = self._require_name_from_body(payload)
+                self._send_json(self.server.app.save_config(name, payload))
+                return
+            if parsed.path == "/api/process/start":
+                name = self._require_name_from_body(payload)
+                command = payload.get("command", "")
+                if not isinstance(command, str):
+                    raise RuntimeError("Command must be a string.")
+                isolate_cpu = payload.get("isolate_cpu", True)
+                if not isinstance(isolate_cpu, bool):
+                    raise RuntimeError("isolate_cpu must be a boolean.")
+                isolate_cpu_spec = payload.get("isolate_cpu_spec", "")
+                if not isinstance(isolate_cpu_spec, str):
+                    raise RuntimeError("isolate_cpu_spec must be a string.")
+                override_isolate = payload.get("override_isolate", False)
+                if not isinstance(override_isolate, bool):
+                    raise RuntimeError("override_isolate must be a boolean.")
+                sudo_password = self._read_sudo_password(payload)
+                effective_spec = isolate_cpu_spec if override_isolate else None
+                self._send_json(
+                    self.server.app.process_start(name, command, isolate_cpu, effective_spec, sudo_password)
+                )
+                return
+            if parsed.path == "/api/process/stop":
+                name = self._require_name_from_body(payload)
+                sudo_password = self._read_sudo_password(payload)
+                self._send_json(self.server.app.process_stop(name, sudo_password))
+                return
+            if parsed.path == "/api/process/reset-isolation":
+                name = self._require_name_from_body(payload)
+                sudo_password = self._read_sudo_password(payload)
+                self._send_json(self.server.app.process_reset_isolation(name, sudo_password))
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+        except RuntimeError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def _serve_index(self) -> None:
+        page = load_html_page().replace("{{APP_STATE_JSON}}", self.server.app.app_state_json())
+        body = page.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("JSON body must be an object.")
+        return payload
+
+    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    @staticmethod
+    def _require_name(parsed: Any) -> str:
+        query = parse_qs(parsed.query)
+        names = query.get("name", [])
+        if not names:
+            raise RuntimeError("Missing 'name' query parameter.")
+        return names[0]
+
+    @staticmethod
+    def _require_name_from_body(payload: dict[str, Any]) -> str:
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("Missing 'name' in request body.")
+        return name
+
+    @staticmethod
+    def _read_sudo_password(payload: dict[str, Any]) -> str:
+        sudo_password = payload.get("sudo_password", "")
+        if not isinstance(sudo_password, str):
+            raise RuntimeError("sudo_password must be a string.")
+        return sudo_password
+
+
+class ConfigEditorServer(ThreadingHTTPServer):
+    def __init__(self, server_address: tuple[str, int], app: ConfigEditorApp) -> None:
+        super().__init__(server_address, ConfigEditorHandler)
+        self.app = app
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Web-based parameter/value config editor and runtime launcher for OpenISAC."
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host, e.g. 0.0.0.0 for remote access.")
+    parser.add_argument("--port", type=int, default=8765, help="HTTP listen port.")
+    parser.add_argument(
+        "--build-dir",
+        default="build",
+        help="Build directory that contains Modulator.yaml, Demodulator.yaml, and binaries.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parent.parent
+    build_dir = (repo_root / args.build_dir).resolve()
+    app = ConfigEditorApp(repo_root=repo_root, build_dir=build_dir)
+    atexit.register(app.stop_all)
+
+    server = ConfigEditorServer((args.host, args.port), app)
+    print(f"OpenISAC Config Console listening on http://{args.host}:{args.port}")
+    print(f"Runtime build directory: {build_dir}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\\nShutting down...")
+    finally:
+        server.server_close()
+        app.stop_all()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
