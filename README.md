@@ -10,11 +10,87 @@
 
 [中文版本](README_zh.md)
 
-OpenISAC is a simple OFDM-based communication and sensing system designed for academic experiments and rapid algorithm validation.
+OpenISAC is a real-time OFDM platform for integrated sensing and communication (ISAC), built for academic experiments and rapid PHY iteration.
 
-Its goal is to provide a clean, minimal, easy-to-modify OFDM platform so researchers can iterate quickly on PHY/sensing ideas without the overhead of a full standard-compliant stack.
+It is designed for the common gap between simulation code and full standard stacks: simple enough to modify quickly, but complete enough to run over the air with USRP hardware.
 
-Because it focuses on simplicity, OpenISAC typically requires less compute and can often run at higher sampling rates than more complex, feature-complete systems.
+If your goal is "idea -> OTA experiment" with a minimal and readable codebase, this repository is a good fit. If you need Wi-Fi/5G NR interoperability or a production-grade protocol stack, it is not.
+
+## Highlights
+
+- Real-time OFDM communication plus monostatic and bistatic sensing
+- Over-the-air synchronization support for bistatic experiments
+- C++ backend for the radio path and Python frontend tools for visualization
+- YAML-based runtime configuration with sample presets for X310/B210, adaptable to other UHD-supported USRPs
+- Included utilities for CPU isolation, plotting, web-based config editing, and process control
+
+## At a Glance
+
+| Component | Main entry points | Purpose |
+| :--- | :--- | :--- |
+| BS backend | `OFDMModulator`, `config/Modulator_*.yaml` | Transmit OFDM frames, ingest UDP payloads, and output monostatic sensing data |
+| UE backend | `OFDMDemodulator`, `config/Demodulator_*.yaml` | Receive and decode frames, output payload data, and run bistatic sensing |
+| Frontend tools | `scripts/plot_*.py`, `scripts/config_web_editor.py` | Visualize sensing/channel results and edit runtime configs |
+
+## Quick Navigation
+
+- Setup and installation: [Hardware Setup](#hardware-setup), [Software Installation](#software-installation)
+- First end-to-end run: [Typical Usage Example](#typical-usage-example)
+- Runtime configuration: [OFDM Modulator](#ofdm-modulator), [OFDM Demodulator](#ofdm-demodulator)
+- Web control UI: [Web Config Console](#7-web-config-console)
+
+## Repository Layout
+
+| Path | Description |
+| :--- | :--- |
+| `src/`, `include/` | Core C++ PHY, sensing, threading, and runtime logic |
+| `config/` | Sample YAML presets for different roles, including X310/B210 examples that can be adapted to other USRPs |
+| `scripts/` | Python frontends, web config console, and Linux performance helpers |
+| `capture/` | Offline plotting helpers for saved sensing results |
+| `docs/` | Static project site and architecture/signal-processing pages |
+
+## Common Workflows
+
+| Goal | Backend program | Typical config | Typical frontend |
+| :--- | :--- | :--- | :--- |
+| Run the BS side | `OFDMModulator` | `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` | `plot_sensing.py` / `plot_sensing_fast.py` |
+| Run the UE side | `OFDMDemodulator` | `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` | `plot_bi_sensing.py` / `plot_bi_sensing_fast.py` |
+| Tune parameters from a browser | `scripts/config_web_editor.py` | Reads `build/Modulator.yaml` and `build/Demodulator.yaml` | Browser at `http://<host>:8765` |
+
+## Before the First OTA Run
+
+- Prepare two backend nodes: BS uses one TX plus one RX antenna path; UE uses one RX path.
+- Start from the sample YAML that is closest to your hardware. The repository includes X310/B210 examples, but it is not limited to those USRP models.
+- Copy runtime YAMLs into `build/`, because both binaries read `Modulator.yaml` or `Demodulator.yaml` from their working directory.
+- If the frontend runs on another machine, set `default_ip` in the runtime YAML to that machine's IP.
+- If you care about stable real-time behavior, run `scripts/set_performance.bash`, then apply CPU isolation with `sudo ../scripts/isolate_cpus.bash` (or a custom CPU set), and only then launch via `sudo ../scripts/isolate_cpus.bash run ...`.
+
+## What it is - and what it is not
+
+### What OpenISAC is
+
+- A minimal OFDM-based PHY for joint communication and sensing research
+- Designed for prototyping, academic experiments, and rapid algorithm validation
+- Focused on readability and modification speed rather than full-stack completeness
+
+### What OpenISAC is not
+
+- A standard-compliant implementation; it does not aim to match Wi-Fi or 5G NR
+- A replacement for full-stack systems such as openwifi or OpenAirInterface
+- A production-ready communications stack
+
+### When to use it
+
+- Prototyping new OFDM/ISAC algorithms
+- Rapidly validating PHY, synchronization, or sensing ideas over the air
+- Research setups where interoperability is not required
+
+### When not to use it
+
+- Building a Wi-Fi/NR-compatible system
+- Requiring full MAC/stack behavior, interoperability, or certification-oriented behavior
+
+## Citation
 
 If you find this repository useful, please cite our paper:
 
@@ -43,32 +119,7 @@ If you find this repository useful, please cite our paper:
 
   <img src="docs/images/WeChat.jpg" width="150" alt="WeChat QR Code">
 
-## What it is — and what it is not
-
-### What OpenISAC is
-
-- A minimal OFDM-based PHY for joint communication and sensing research
-- Designed for prototyping, academic experiments, and rapid algorithm validation
-
-### What OpenISAC is not
-
-- A standard-compliant implementation (it does not aim to comply with standards such as Wi‑Fi or 5G NR)
-- A replacement for full-stack standard implementations like openwifi or OpenAirInterface
-
-If your goal is interoperability, standards compliance, or a production-grade protocol stack, those projects are the right direction.
-
-### When to use it
-
-- Prototyping and testing new OFDM/ISAC algorithms
-- Fast “idea → experiment” cycles with a minimal PHY
-- Research setups where interoperability is not required
-
-### When not to use it
-
-- Building a Wi‑Fi/NR-compatible system
-- Needing real-world standard features (full MAC/stack behavior, interoperability, certification-oriented behavior, etc.)
-
-## Hardware Requirements
+## Hardware Setup
  
 ### Backend (C++)
  
@@ -108,7 +159,7 @@ To support high bandwidth and sample rates, ensure the connection between the Co
 *   **GPU**: An Nvidia GPU is recommended for acceleration.
 
 
-## Software Requirements
+## Software Installation
  
 ### Backend (C++)
  
@@ -342,10 +393,12 @@ sudo -s
 cd build
 # For X310:
 cp ../config/Modulator_X310.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 
 # For B210:
 cp ../config/Modulator_B210.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 ```
 *If you are using a separate frontend computer, set `default_ip` in `Modulator.yaml` to that frontend IP.*
@@ -356,10 +409,12 @@ sudo -s
 cd build
 # For X310:
 cp ../config/Demodulator_X310.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 
 # For B210:
 cp ../config/Demodulator_B210.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 ```
 *If you are using a separate frontend computer, set `default_ip` in `Demodulator.yaml` to that frontend IP.*
