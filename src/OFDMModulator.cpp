@@ -23,6 +23,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <Common.hpp>
+#include "LDPCCodec.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
 #include <functional>
@@ -31,12 +32,38 @@
 
 // Type aliases are now defined in Common.hpp
 
+namespace {
+
+const char* tx_async_event_code_to_string(uhd::async_metadata_t::event_code_t event_code)
+{
+    switch (event_code) {
+    case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+        return "BURST_ACK";
+    case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
+        return "UNDERFLOW";
+    case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
+        return "SEQ_ERROR";
+    case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+        return "TIME_ERROR";
+    case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET:
+        return "UNDERFLOW_IN_PACKET";
+    case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST:
+        return "SEQ_ERROR_IN_BURST";
+    case uhd::async_metadata_t::EVENT_CODE_USER_PAYLOAD:
+        return "USER_PAYLOAD";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+} // namespace
+
 struct QueuedTxFrame {
     AlignedVector samples;
     std::shared_ptr<const SymbolVector> symbols;
-    int64_t ingest_time_ns{0};
-    int64_t encoded_time_ns{0};
-    int64_t mod_done_time_ns{0};
+    int64_t ingest_time_ns{0};    // T1: UDP packet received by _data_ingest_proc
+    int64_t encoded_time_ns{0};   // T2: packet pushed into _data_packet_buffer (after LDPC encode)
+    int64_t mod_done_time_ns{0};  // T3: frame pushed into _circular_buffer (after IFFT/CP)
 };
 
 /**
@@ -140,8 +167,9 @@ public:
         }
 
         if (_tx_usrp) {
+            constexpr double kStartLeadTimeSec = 1.0;
             const double now_s = _tx_usrp->get_time_now().get_real_secs();
-            const double scheduled_start_s = std::ceil(now_s) + 1.0;
+            const double scheduled_start_s = std::ceil(now_s + kStartLeadTimeSec);
             _start_time = uhd::time_spec_t(scheduled_start_s);
             LOG_G_INFO() << std::fixed << std::setprecision(6)
                       << "[Start] Scheduled unified TX/RX start_time="
@@ -149,7 +177,14 @@ public:
                       << std::defaultfloat;
         }
 
+        _tx_async_exit_requested.store(false, std::memory_order_relaxed);
+        _tx_underflow_restart_requested.store(false, std::memory_order_relaxed);
+        _tx_time_error_restart_requested.store(false, std::memory_order_relaxed);
+        _tx_time_error_count.store(0, std::memory_order_relaxed);
         _tx_thread = std::thread(&OFDMISACEngine::_tx_proc, this);
+        if (_tx_stream) {
+            _tx_async_thread = std::thread(&OFDMISACEngine::_tx_async_event_proc, this);
+        }
 
         for (auto& ch : _sensing_channels) {
             ch->start(_start_time);
@@ -171,6 +206,8 @@ public:
         if (_mod_thread.joinable()) _mod_thread.join();
         if (_tx_thread.joinable()) _tx_thread.join();
         if (_data_thread.joinable()) _data_thread.join();
+        _tx_async_exit_requested.store(true, std::memory_order_relaxed);
+        if (_tx_async_thread.joinable()) _tx_async_thread.join();
 
         for (auto& ch : _sensing_channels) {
             ch->join();
@@ -203,6 +240,11 @@ private:
     std::atomic<bool> _running{false};
     std::thread _mod_thread;             // Modulation thread
     std::thread _tx_thread;              // TX thread
+    std::thread _tx_async_thread;        // TX async event monitor
+    std::atomic<bool> _tx_async_exit_requested{false};
+    std::atomic<bool> _tx_underflow_restart_requested{false};
+    std::atomic<bool> _tx_time_error_restart_requested{false};
+    std::atomic<uint64_t> _tx_time_error_count{0};
     
     uhd::time_spec_t _start_time{0.0}; 
 
@@ -327,6 +369,14 @@ private:
         _sensing_channels[ch_id]->set_alignment(value);
     }
 
+    void _set_target_alignment_for_channel(uint32_t ch_id, int32_t value) {
+        if (ch_id >= _sensing_channels.size()) {
+            LOG_G_WARN() << "Invalid sensing channel id for target ALGN: " << ch_id;
+            return;
+        }
+        _sensing_channels[ch_id]->set_target_alignment(value);
+    }
+
     void _set_rx_gain_for_channel(uint32_t ch_id, double gain_db) {
         if (ch_id >= _sensing_channels.size()) {
             LOG_G_WARN() << "Invalid sensing channel id for RXGN: " << ch_id;
@@ -348,20 +398,30 @@ private:
 
         _control_handler.register_command("ALGN", [this](int32_t value) {
             const int64_t max_adjust = static_cast<int64_t>(_cfg.samples_per_frame());
-            const int64_t clamped_value = std::clamp<int64_t>(
-                static_cast<int64_t>(value),
-                -max_adjust,
-                max_adjust
-            );
-            const int32_t adjusted_value = static_cast<int32_t>(clamped_value);
             const int64_t target = _align_target_channel.load();
             if (target < 0) {
                 for (uint32_t i = 0; i < _sensing_channels.size(); ++i) {
-                    _set_alignment_for_channel(i, adjusted_value);
+                    const int64_t next_target = std::clamp<int64_t>(
+                        static_cast<int64_t>(_sensing_channels[i]->target_alignment()) +
+                            static_cast<int64_t>(value),
+                        -max_adjust,
+                        max_adjust);
+                    _set_target_alignment_for_channel(i, static_cast<int32_t>(next_target));
                 }
                 return;
             }
-            _set_alignment_for_channel(static_cast<uint32_t>(target), adjusted_value);
+            if (static_cast<uint32_t>(target) >= _sensing_channels.size()) {
+                LOG_G_WARN() << "Invalid sensing channel id for target ALGN delta: " << target;
+                return;
+            }
+            const int64_t next_target = std::clamp<int64_t>(
+                static_cast<int64_t>(_sensing_channels[static_cast<uint32_t>(target)]->target_alignment()) +
+                    static_cast<int64_t>(value),
+                -max_adjust,
+                max_adjust);
+            _set_target_alignment_for_channel(
+                static_cast<uint32_t>(target),
+                static_cast<int32_t>(next_target));
         });
 
         _control_handler.register_command("SKIP", [this](int32_t value) {
@@ -507,6 +567,66 @@ private:
         }
 
         return total_sent;
+    }
+
+    void _tx_async_event_proc() {
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
+
+        while (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
+            if (!_tx_stream) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            uhd::async_metadata_t async_md;
+            bool got_event = false;
+            try {
+                got_event = _tx_stream->recv_async_msg(async_md, 0.1);
+            } catch (const std::exception& e) {
+                if (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
+                    LOG_G_WARN() << "[TX Async] recv_async_msg failed: " << e.what();
+                }
+                continue;
+            }
+
+            if (!got_event) {
+                continue;
+            }
+
+            auto log_event = [&](auto&& log_line) {
+                log_line << "[TX Async] " << tx_async_event_code_to_string(async_md.event_code)
+                         << " (code=0x" << std::hex << static_cast<int>(async_md.event_code) << std::dec
+                         << ", channel=" << async_md.channel;
+                if (async_md.has_time_spec) {
+                    log_line << ", event_time=" << std::fixed << std::setprecision(6)
+                             << async_md.time_spec.get_real_secs() << " s" << std::defaultfloat;
+                }
+                log_line << ")";
+            };
+
+            switch (async_md.event_code) {
+            case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+                log_event(LOG_G_INFO());
+                break;
+            case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
+            case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET:
+                _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
+                log_event(LOG_G_WARN());
+                break;
+            case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
+            case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST:
+            case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+                if (async_md.event_code == uhd::async_metadata_t::EVENT_CODE_TIME_ERROR) {
+                    _tx_time_error_restart_requested.store(true, std::memory_order_relaxed);
+                    _tx_time_error_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                log_event(LOG_G_ERROR());
+                break;
+            default:
+                log_event(LOG_G_INFO());
+                break;
+            }
+        }
     }
 
     void _init_fftw() {
@@ -800,8 +920,8 @@ private:
             prof_step_start = ProfileClock::now();
             AlignedIntVector data_pool;
             data_pool.reserve(max_data_syms_per_frame);
-            int64_t frame_ingest_ns = 0;
-            int64_t frame_encoded_ns = 0;
+            int64_t frame_ingest_ns = 0;  // T1: UDP recv time of first real packet
+            int64_t frame_encoded_ns = 0; // T2: LDPC encode done time of first real packet
             // Pull packets only when the *whole* packet fits in current frame room.
             while (data_pool.size() < max_data_syms_per_frame) {
                 AlignedIntVector* pkt_slot = _data_packet_buffer.consumer_slot();
@@ -827,6 +947,7 @@ private:
                 }
                 AlignedIntVector pkt = std::move(*pkt_slot);
                 _data_packet_buffer.consumer_pop();
+                // Consume paired timestamps; use first packet's timestamps as frame reference
                 if (do_latency_profile) {
                     PktTimestamps pts{};
                     _data_packet_ingest_ts.try_pop(pts);
@@ -1022,17 +1143,121 @@ private:
         uhd::tx_metadata_t md;
         md.start_of_burst = true;
         md.end_of_burst = false;
-        md.has_time_spec = true;
-        md.time_spec = _start_time;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // wait for prefill
+        const double tick_rate = _tx_usrp ? _tx_usrp->get_master_clock_rate() : _cfg.sample_rate;
+        const double exact_frame_ticks =
+            static_cast<double>(_cfg.samples_per_frame()) * tick_rate / _cfg.sample_rate;
+        const long long frame_ticks = std::llround(exact_frame_ticks);
+        const double frame_tick_error = std::abs(exact_frame_ticks - static_cast<double>(frame_ticks));
+        if (frame_tick_error > 1e-6) {
+            LOG_G_WARN() << std::fixed << std::setprecision(6)
+                         << "[TX] Frame duration quantized to " << frame_ticks
+                         << " ticks at tick_rate=" << tick_rate
+                         << " Hz (error=" << frame_tick_error << " ticks)"
+                         << std::defaultfloat;
+        }
+        long long next_frame_ticks = _start_time.to_ticks(tick_rate);
+        uint64_t handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
+        bool next_frame_starts_burst = true;
+
+        if (_tx_usrp) {
+            constexpr double kTxSubmitLeadSec = 0.25;
+            while (_running.load(std::memory_order_relaxed)) {
+                const uhd::time_spec_t next_frame_time =
+                    uhd::time_spec_t::from_ticks(next_frame_ticks, tick_rate);
+                const double wait_s =
+                    (next_frame_time - _tx_usrp->get_time_now()).get_real_secs() - kTxSubmitLeadSec;
+                if (wait_s <= 0.0) break;
+                std::this_thread::sleep_for(std::chrono::duration<double>(std::min(wait_s, 0.05)));
+            }
+        }
+
+        auto drop_one_queued_frame = [&]() -> bool {
+            QueuedTxFrame dropped_frame;
+            if (!_circular_buffer.try_pop(dropped_frame)) {
+                return false;
+            }
+            _frame_pool.release(std::move(dropped_frame.samples));
+            return true;
+        };
+
+        auto restart_tx_burst = [&](const char* reason) {
+            if (!_tx_usrp || !_tx_stream || next_frame_ticks <= 0 || frame_ticks <= 0) {
+                return;
+            }
+
+            uhd::tx_metadata_t eob_md;
+            eob_md.start_of_burst = false;
+            eob_md.end_of_burst = true;
+            eob_md.has_time_spec = false;
+            try {
+                _tx_stream->send("", 0, eob_md);
+            } catch (const std::exception& e) {
+                LOG_RT_WARN() << "[TX] Failed to terminate burst after " << reason
+                              << ": " << e.what();
+            }
+
+            constexpr double kRestartLeadSec = 1.0;
+            const long long restart_lead_ticks = std::max<long long>(
+                frame_ticks,
+                static_cast<long long>(std::ceil(kRestartLeadSec * tick_rate)));
+            const long long now_ticks = _tx_usrp->get_time_now().to_ticks(tick_rate);
+            const long long target_ticks = now_ticks + restart_lead_ticks;
+            uint64_t frames_to_skip = 0;
+            if (next_frame_ticks < target_ticks) {
+                const long long late_ticks = target_ticks - next_frame_ticks;
+                frames_to_skip = static_cast<uint64_t>((late_ticks + frame_ticks - 1) / frame_ticks);
+            }
+
+            size_t dropped_frames = 0;
+            for (uint64_t i = 0; i < frames_to_skip; ++i) {
+                if (drop_one_queued_frame()) {
+                    ++dropped_frames;
+                }
+            }
+
+            next_frame_ticks += static_cast<long long>(frames_to_skip) * frame_ticks;
+            _next_tx_frame_seq.fetch_add(frames_to_skip, std::memory_order_relaxed);
+            _next_frame_start_symbol.fetch_add(
+                frames_to_skip * static_cast<uint64_t>(_cfg.num_symbols),
+                std::memory_order_relaxed);
+            handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
+            next_frame_starts_burst = true;
+
+            LOG_RT_WARN() << std::fixed << std::setprecision(6)
+                          << "[TX] " << reason << " restart scheduled at "
+                          << uhd::time_spec_t::from_ticks(next_frame_ticks, tick_rate).get_real_secs()
+                          << " s, skipped " << frames_to_skip
+                          << " frame slots and dropped " << dropped_frames
+                          << " queued frames" << std::defaultfloat;
+        };
 
         while (_running.load(std::memory_order_relaxed)) {
+            if (_tx_underflow_restart_requested.exchange(false, std::memory_order_relaxed)) {
+                restart_tx_burst("UNDERFLOW");
+            }
+
+            if (_tx_time_error_restart_requested.exchange(false, std::memory_order_relaxed)) {
+                handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
+                restart_tx_burst("TIME_ERROR");
+            }
+
+            const uint64_t observed_time_error_count =
+                _tx_time_error_count.load(std::memory_order_relaxed);
+            if (observed_time_error_count != handled_time_error_count) {
+                handled_time_error_count = observed_time_error_count;
+            }
+
             QueuedTxFrame frame_to_send;
             const bool has_frame = _circular_buffer.try_pop(frame_to_send);
             const uint64_t air_frame_seq = _next_tx_frame_seq.load(std::memory_order_relaxed);
             const uint64_t frame_start_symbol = _next_frame_start_symbol.load(std::memory_order_relaxed);
+            md.start_of_burst = next_frame_starts_burst;
+            md.end_of_burst = false;
+            md.has_time_spec = true;
+            md.time_spec = uhd::time_spec_t::from_ticks(next_frame_ticks, tick_rate);
 
             if (has_frame) {
+                // Measure per-stage latency
                 if (do_latency_profile && frame_to_send.ingest_time_ns != 0) {
                     const int64_t t4_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -1050,6 +1275,7 @@ private:
                     frame_to_send.samples.size(),
                     md);
                 if (sent < frame_to_send.samples.size()) {
+                    _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
                     LOG_RT_WARN() << "TX Underflow: "
                                   << (frame_to_send.samples.size() - sent) << " samples";
                 } else if (frame_to_send.symbols) {
@@ -1067,9 +1293,8 @@ private:
             _next_frame_start_symbol.fetch_add(
                 static_cast<uint64_t>(_cfg.num_symbols),
                 std::memory_order_relaxed);
-            //md.time_spec += uhd::time_spec_t(_cfg.samples_per_frame() / _cfg.sample_rate);
-            md.start_of_burst = false;
-            md.has_time_spec = false;
+            next_frame_ticks += frame_ticks;
+            next_frame_starts_burst = false;
         }
         
         md.end_of_burst = true;
@@ -1100,7 +1325,7 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
         return 1;
     }
 
-    if (!std::filesystem::exists(default_config_file)) {
+    if (!path_exists(default_config_file)) {
         LOG_G_ERROR() << "Config file '" << default_config_file
                       << "' not found. Copy a sample file from the repository config directory, "
                       << "such as 'Modulator_X310.yaml' or 'Modulator_B210.yaml', to '" << default_config_file

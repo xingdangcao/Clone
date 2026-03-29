@@ -53,11 +53,13 @@ public:
     );
     void process_bistatic_frame(const SensingFrame& frame, uint64_t frame_start_symbol_index);
 
+    void set_target_alignment(int32_t samples);
     void set_alignment(int32_t samples);
     bool set_rx_gain(double requested_gain_db, double* applied_gain_db = nullptr);
     void apply_shared_cfg(const SharedSensingRuntime& snapshot);
 
     uint32_t logical_id() const;
+    int32_t target_alignment() const;
     const SensingRxChannelConfig& channel_cfg() const;
 
     static void initialize_rx_hardware_and_sync(
@@ -100,6 +102,7 @@ private:
         ObjectPool<AlignedVector> rx_frame_pool;
         std::unique_ptr<PairedFrameQueue> paired_queue;
         std::atomic<RxState> rx_state{RxState::ALIGNMENT};
+        std::atomic<int32_t> target_alignment{0};
         std::atomic<int32_t> discard_samples{0};
         uint64_t next_rx_frame_seq = 0;
         std::thread rx_thread;
@@ -125,7 +128,7 @@ private:
         bool active_enable_mti = true;
         bool active_skip_sensing_fft = true;
         bool delay_estimation_enabled = false;
-        bool delay_estimation_one_shot_done = false;
+        uint64_t next_delay_estimation_frame_seq = 0;
         bool sensing_pipeline_disabled_by_mode = false;
         uint64_t applied_generation = 0;
         std::unique_ptr<SyncProcessor> system_delay_sync;
@@ -143,6 +146,14 @@ private:
         std::vector<float> subcarrier_phases_unit_delay;
         std::chrono::steady_clock::time_point next_hb_time;
         std::chrono::steady_clock::time_point next_send_time;
+        double pending_batch_gather_us = 0.0;
+        double prof_gather_total_us = 0.0;
+        double prof_prep_total_us = 0.0;
+        double prof_chest_shift_total_us = 0.0;
+        double prof_mti_total_us = 0.0;
+        double prof_windows_fft_total_us = 0.0;
+        double prof_send_total_us = 0.0;
+        uint64_t prof_batch_count = 0;
         std::thread sensing_thread;
 
         SensingComputeContext(const Config& cfg, const SensingRxChannelConfig& c);
@@ -161,11 +172,13 @@ private:
     void _sensing_loop();
     void _send_heartbeat_if_due(const std::chrono::steady_clock::time_point& now);
     void _estimate_system_delay(const AlignedVector& rx_frame_data, uint64_t frame_seq);
-    void _sensing_process(const SensingFrame& frame, uint64_t first_symbol_index);
-    void _sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index);
+    void _sensing_process(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us);
+    void _sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us);
     void _sensing_process_finalize(
         const std::vector<AlignedVector>& tx_symbols,
-        uint64_t first_symbol_index
+        uint64_t first_symbol_index,
+        double gather_us,
+        double prep_us
     );
     void _apply_shared_sensing_if_due(uint64_t symbol_index);
 

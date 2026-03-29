@@ -23,6 +23,7 @@
 #include <chrono>
 #include <iostream>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <stdexcept>
 #include <limits>
@@ -37,19 +38,17 @@
 #include <uhd/types/metadata.hpp>
 #include <uhd/types/time_spec.hpp>
 #include <uhd/utils/thread.hpp>
-#include <aff3ct.hpp>
 #include <fcntl.h>
 #include <termios.h>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <queue>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <filesystem>
 #include <yaml-cpp/yaml.h>
 #include "AsyncLogger.hpp"
-#include "LDPC5041008SIMD.hpp"
 
 /**
  * @brief STL-compliant Aligned Memory Allocator.
@@ -473,6 +472,8 @@ struct Config {
     size_t cp_length = 128;            // Cyclic prefix length
     size_t num_symbols = 100;          // Number of symbols per frame
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
+    size_t cuda_mod_pipeline_slots = 2;   // Number of CUDA mod pipeline slots
+    size_t cuda_demod_pipeline_slots = 3; // Number of CUDA demod pipeline slots
     size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
     size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
     size_t sync_pos = 1;               // Synchronization symbol position
@@ -559,13 +560,35 @@ struct Config {
     size_t data_packet_buffer_size = 32;   // Capacity of modulator encoded packet buffer
     size_t paired_frame_queue_size = 8;    // Capacity of per-channel RX/TX pairing queues
     std::vector<size_t> available_cores = {0, 1, 2, 3, 4, 5};
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, or "all"
     
     // Check if a specific module should be profiled
     bool should_profile(const std::string& module) const {
         if (profiling_modules.empty()) return false;
         if (profiling_modules == "all") return true;
-        return profiling_modules.find(module) != std::string::npos;
+        size_t pos = 0;
+        while (pos < profiling_modules.size()) {
+            while (pos < profiling_modules.size() &&
+                   (profiling_modules[pos] == ',' ||
+                    std::isspace(static_cast<unsigned char>(profiling_modules[pos])))) {
+                ++pos;
+            }
+            const size_t token_start = pos;
+            while (pos < profiling_modules.size() && profiling_modules[pos] != ',') {
+                ++pos;
+            }
+            size_t token_end = pos;
+            while (token_end > token_start &&
+                   std::isspace(static_cast<unsigned char>(profiling_modules[token_end - 1]))) {
+                --token_end;
+            }
+            const size_t token_len = token_end - token_start;
+            if (token_len == module.size() &&
+                profiling_modules.compare(token_start, token_len, module) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Calculate total samples per frame
@@ -595,6 +618,10 @@ inline std::string format_freq_hz(double value_hz) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(5) << value_hz;
     return oss.str();
+}
+
+inline bool path_exists(const std::string& path) {
+    return !path.empty() && ::access(path.c_str(), F_OK) == 0;
 }
 
 inline size_t core_from_hint(const Config& cfg, size_t hint) {
@@ -639,6 +666,7 @@ inline Config make_default_modulator_config() {
     cfg.zc_root = 29;
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     cfg.num_symbols = 100;
+    cfg.cuda_mod_pipeline_slots = 2;
     cfg.mono_sensing_ip = "";
     cfg.mono_sensing_port = 8888;
     cfg.control_port = 9999;
@@ -668,6 +696,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
+    out << YAML::Key << "cuda_mod_pipeline_slots" << YAML::Value << cfg.cuda_mod_pipeline_slots;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
     out << YAML::Key << "rx_device_args" << YAML::Value << cfg.rx_device_args;
@@ -723,7 +752,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
 }
 
 inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& filepath) {
-    if (!std::filesystem::exists(filepath)) {
+    if (!path_exists(filepath)) {
         return false;
     }
     try {
@@ -747,6 +776,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
         if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
         if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
+        if (config["cuda_mod_pipeline_slots"]) {
+            cfg.cuda_mod_pipeline_slots = config["cuda_mod_pipeline_slots"].as<size_t>();
+        }
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["tx_device_args"]) cfg.tx_device_args = config["tx_device_args"].as<std::string>();
         if (config["rx_device_args"]) cfg.rx_device_args = config["rx_device_args"].as<std::string>();
@@ -829,6 +861,10 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
                      << ". Expanding doppler_fft_size to sensing_symbol_num to keep sensing buffers consistent.";
         cfg.doppler_fft_size = cfg.sensing_symbol_num;
     }
+    if (cfg.cuda_mod_pipeline_slots == 0) {
+        LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
+        cfg.cuda_mod_pipeline_slots = 1;
+    }
     if (cfg.tx_circular_buffer_size == 0) {
         LOG_G_WARN() << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
         cfg.tx_circular_buffer_size = 1;
@@ -903,6 +939,7 @@ inline Config make_default_demodulator_config() {
     cfg.doppler_fft_size = 100;
     cfg.num_symbols = 100;
     cfg.sensing_symbol_num = 100;
+    cfg.cuda_demod_pipeline_slots = 3;
     cfg.frame_queue_size = 8;
     cfg.sync_queue_size = 8;
     cfg.sync_pos = 1;
@@ -968,6 +1005,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
+    out << YAML::Key << "cuda_demod_pipeline_slots" << YAML::Value << cfg.cuda_demod_pipeline_slots;
     out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
     out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
     out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
@@ -1034,7 +1072,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
 }
 
 inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& filepath) {
-    if (!std::filesystem::exists(filepath)) {
+    if (!path_exists(filepath)) {
         return false;
     }
     try {
@@ -1066,6 +1104,9 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
         if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
         if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
+        if (config["cuda_demod_pipeline_slots"]) {
+            cfg.cuda_demod_pipeline_slots = config["cuda_demod_pipeline_slots"].as<size_t>();
+        }
         if (config["frame_queue_size"]) cfg.frame_queue_size = config["frame_queue_size"].as<size_t>();
         if (config["sync_queue_size"]) cfg.sync_queue_size = config["sync_queue_size"].as<size_t>();
         if (config["reset_hold_s"]) cfg.reset_hold_s = config["reset_hold_s"].as<double>();
@@ -1151,6 +1192,10 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
                      << " is smaller than sensing_symbol_num=" << cfg.sensing_symbol_num
                      << ". Expanding doppler_fft_size to sensing_symbol_num to keep sensing buffers consistent.";
         cfg.doppler_fft_size = cfg.sensing_symbol_num;
+    }
+    if (cfg.cuda_demod_pipeline_slots == 0) {
+        LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
+        cfg.cuda_demod_pipeline_slots = 1;
     }
     if (cfg.frame_queue_size == 0) {
         LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
@@ -1240,6 +1285,7 @@ struct RxFrame {
     AlignedVector frame_data;  // Received symbol collection
     int Alignment;
     int64_t usrp_time_ns = -1; // USRP timestamp of the frame start sample
+    int64_t host_enqueue_time_ns = 0; // Host timestamp after full-frame RX, before queue push
     uint64_t generation = 0;   // Sync generation used to drop stale frames after a hard resync
 };
 
@@ -1979,6 +2025,9 @@ public:
     void add_data(DataPackage&& data) {
         if (!running_.load(std::memory_order_acquire)) return;
         if (delivery_mode_ == DeliveryMode::LatestOnly) {
+            // Display/telemetry path: never block the producer. If the queue is
+            // full, drop the newest update and let the sender drain to the most
+            // recent queued snapshot on its next scheduled wake-up.
             queue_.try_push(std::move(data));
             return;
         }
@@ -2636,250 +2685,6 @@ inline std::string get_executable_dir() {
         }
     }
     return ".";
-}
-
-/**
- * @brief LDPC Codec Wrapper (custom LDPC5041008 encoder + AFF3CT decoder).
- * 
- * Provides a simplified interface for LDPC encoding/decoding.
- * Uses LDPC5041008SIMD for encoding and AFF3CT for decoding.
- */
-class LDPCCodec {
-public:
-    using AlignedByteVector = mipp::vector<int8_t>;
-    using AlignedIntVector = mipp::vector<int32_t>;
-    using AlignedFloatVector = mipp::vector<float>;
-    struct LDPCConfig {
-        std::string h_matrix_path = "../LDPC_504_1008.alist";
-        std::string g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
-        int decoder_iterations = 6;
-        size_t n_frames = 16;
-        std::string enc_type = "LDPC_H";
-        std::string enc_g_method = "IDENTITY";
-        std::string dec_type = "BP_HORIZONTAL_LAYERED";
-        std::string dec_implem = "NMS";
-        std::string dec_simd = "INTER";
-        bool use_custom_encoder = true;
-    };
-
-    LDPCCodec(const LDPCConfig& config) : cfg(config) {
-        namespace fs = std::filesystem;
-        auto path_exists = [](const std::string& p) {
-            std::error_code ec;
-            return fs::exists(fs::path(p), ec);
-        };
-
-        // Resolve relative path against executable directory
-        if (!cfg.h_matrix_path.empty() && cfg.h_matrix_path[0] != '/') {
-            cfg.h_matrix_path = get_executable_dir() + "/" + cfg.h_matrix_path;
-        }
-        if (!cfg.g_matrix_path.empty() && cfg.g_matrix_path[0] != '/') {
-            cfg.g_matrix_path = get_executable_dir() + "/" + cfg.g_matrix_path;
-        }
-        if (!cfg.g_matrix_path.empty() && !path_exists(cfg.g_matrix_path)) {
-            const fs::path g_parent = fs::path(cfg.g_matrix_path).parent_path();
-            const std::string alt_g_1 = (g_parent / "LDPC_504_1008G.alist").string();
-            const std::string alt_g_2 = (g_parent / "PEGReg504x1008_Gen.alist").string();
-            if (path_exists(alt_g_1)) {
-                cfg.g_matrix_path = alt_g_1;
-            } else if (path_exists(alt_g_2)) {
-                cfg.g_matrix_path = alt_g_2;
-            }
-        }
-        if (cfg.use_custom_encoder) {
-            custom_encoder = std::make_unique<LDPC5041008SIMD>(cfg.h_matrix_path, cfg.g_matrix_path);
-        }
-        _init_aff3ct_params();
-        codec = std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>>(codec_factory->build<int, float>());
-        codec->set_n_frames(cfg.n_frames);
-    }
-
-    void encode_frame(const AlignedByteVector& input, AlignedIntVector& encoded_bits) {
-        if (input.empty()) {
-            encoded_bits.clear();
-            return;
-        }
-
-        if (custom_encoder) {
-            custom_encoder->encode_bytes(input, encoded_bits);
-            return;
-        }
-
-        auto& encoder = codec->get_encoder();
-        // Unpack input data
-        AlignedIntVector unpacked_bits(input.size() * 8);
-        _unpack_bits(input, unpacked_bits);
-        const size_t N = encoder.get_N();
-        const size_t K = encoder.get_K();
-        // frame_id=-1 processes get_n_frames() frames per call, NOT n_frames_per_wave
-        const size_t batch = encoder.get_n_frames();
-        const size_t total_frames = unpacked_bits.size() / K;
-
-        encoded_bits.resize(total_frames * N);
-
-        size_t i = 0;
-        for (; i + batch <= total_frames; i += batch) {
-            encoder.encode(unpacked_bits.data() + i * K, encoded_bits.data() + i * N, -1, false);
-        }
-
-        const size_t remaining = total_frames - i;
-        if (remaining > 0) {
-            AlignedIntVector tmp_in(batch * K, 0);
-            AlignedIntVector tmp_out(batch * N, 0);
-            std::memcpy(tmp_in.data(), unpacked_bits.data() + i * K, remaining * K * sizeof(int32_t));
-            encoder.encode(tmp_in.data(), tmp_out.data(), -1, false);
-            std::memcpy(encoded_bits.data() + i * N, tmp_out.data(), remaining * N * sizeof(int32_t));
-        }
-    }
-
-    // Decode entire frame
-    void decode_frame(const AlignedFloatVector& llr_input, AlignedByteVector& decoded_bytes) {
-        auto& decoder = codec->get_decoder_siho();
-        const size_t N = decoder.get_N();
-        const size_t K = decoder.get_K();
-        // frame_id=-1 processes get_n_frames() frames per call, NOT n_frames_per_wave
-        const size_t batch = decoder.get_n_frames();
-        const size_t total_frames = llr_input.size() / N;
-
-        AlignedIntVector decoded_bits(total_frames * K, 0);
-
-        size_t i = 0;
-        for (; i + batch <= total_frames; i += batch) {
-            decoder.decode_siho(llr_input.data() + i * N, decoded_bits.data() + i * K, -1, false);
-        }
-
-        const size_t remaining = total_frames - i;
-        if (remaining > 0) {
-            AlignedFloatVector tmp_in(batch * N, 0.0f);
-            AlignedIntVector tmp_out(batch * K, 0);
-            std::memcpy(tmp_in.data(), llr_input.data() + i * N, remaining * N * sizeof(float));
-            decoder.decode_siho(tmp_in.data(), tmp_out.data(), -1, false);
-            std::memcpy(decoded_bits.data() + i * K, tmp_out.data(), remaining * K * sizeof(int32_t));
-        }
-
-        decoded_bytes.resize(decoded_bits.size() / 8);
-        _pack_bits(decoded_bits, decoded_bytes);
-    }
-    
-    size_t get_K() const {
-        if (custom_encoder) return static_cast<size_t>(LDPC5041008SIMD::K);
-        return codec->get_encoder().get_K();
-    }
-    size_t get_N() const {
-        if (custom_encoder) return static_cast<size_t>(LDPC5041008SIMD::N);
-        return codec->get_encoder().get_N();
-    }
-
-    /**
-     * @brief Pack bits into QPSK symbols (0-3).
-     * Each pair of bits corresponds to one QPSK symbol.
-     */
-    static void pack_bits_qpsk(const AlignedIntVector &bits, AlignedIntVector &qpsk_ints) {
-        const size_t bit_count = bits.size();
-        const size_t symbol_count = (bit_count + 1) / 2;
-        qpsk_ints.resize(symbol_count);
-        const size_t even_pairs = bit_count / 2;
-        #pragma omp simd
-        for (size_t k = 0; k < even_pairs; ++k) {
-            int b0 = bits[2*k] & 1;
-            int b1 = bits[2*k + 1] & 1;
-            qpsk_ints[k] = (b0 << 1) | b1;
-        }
-        if (bit_count & 1) {
-            qpsk_ints[even_pairs] = (bits[bit_count - 1] & 1) << 1;
-        }
-    }
-
-private:
-    LDPCConfig cfg;
-    std::unique_ptr<aff3ct::factory::Codec_LDPC> codec_factory;
-    std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>> codec;
-    std::unique_ptr<LDPC5041008SIMD> custom_encoder;
-    void _init_aff3ct_params() {
-        std::vector<std::string> args = {
-            "LDPCEncoder",
-            "--enc-type", cfg.enc_type,
-            "--enc-g-method", cfg.enc_g_method,
-            "--dec-type", cfg.dec_type,
-            "--dec-implem", cfg.dec_implem,
-            "--dec-ite", std::to_string(cfg.decoder_iterations),
-            "--dec-synd-depth", "1",
-            "--dec-h-path", cfg.h_matrix_path,
-        };
-        if (!cfg.dec_simd.empty()) {
-            args.push_back("--dec-simd");
-            args.push_back(cfg.dec_simd);
-        }
-        // Only pass G-matrix to AFF3CT when it handles encoding itself.
-        // When use_custom_encoder is true, LDPC5041008SIMD owns encoding and
-        // the G-matrix format may be incompatible with AFF3CT, causing
-        // internal corruption (double free).
-        if (!cfg.use_custom_encoder && !cfg.g_matrix_path.empty()) {
-            args.push_back("--enc-g-path");
-            args.push_back(cfg.g_matrix_path);
-        }
-
-        codec_factory = std::make_unique<aff3ct::factory::Codec_LDPC>();
-        
-        std::vector<char*> argv;
-        for (auto& arg : args)
-            argv.push_back(&arg[0]);
-        int argc = static_cast<int>(argv.size());
-        
-        std::vector<aff3ct::factory::Factory*> params_list;
-        params_list.push_back(codec_factory.get());
-        
-        aff3ct::tools::Command_parser cp(argc, argv.data(), params_list, true);
-        aff3ct::tools::Header::print_parameters(params_list);
-    }
-
-    void _unpack_bits(const AlignedByteVector& input_data, AlignedIntVector& unpacked_bits) {
-        const int input_bytes = input_data.size();
-        #pragma omp simd
-        for (int byte_idx = 0; byte_idx < input_bytes; ++byte_idx) {
-            uint8_t byte = input_data[byte_idx];
-            unpacked_bits[byte_idx * 8 + 0] = (byte >> 7) & 1;
-            unpacked_bits[byte_idx * 8 + 1] = (byte >> 6) & 1;
-            unpacked_bits[byte_idx * 8 + 2] = (byte >> 5) & 1;
-            unpacked_bits[byte_idx * 8 + 3] = (byte >> 4) & 1;
-            unpacked_bits[byte_idx * 8 + 4] = (byte >> 3) & 1;
-            unpacked_bits[byte_idx * 8 + 5] = (byte >> 2) & 1;
-            unpacked_bits[byte_idx * 8 + 6] = (byte >> 1) & 1;
-            unpacked_bits[byte_idx * 8 + 7] = (byte >> 0) & 1;
-        }
-    }
-
-    void _pack_bits(const AlignedIntVector& bits, AlignedByteVector& output_data) {
-        const int output_bytes = output_data.size();
-        #pragma omp simd
-        for (int byte_idx = 0; byte_idx < output_bytes; ++byte_idx) {
-            uint8_t byte = 0;
-            byte |= (bits[byte_idx * 8 + 0] & 1) << 7;
-            byte |= (bits[byte_idx * 8 + 1] & 1) << 6;
-            byte |= (bits[byte_idx * 8 + 2] & 1) << 5;
-            byte |= (bits[byte_idx * 8 + 3] & 1) << 4;
-            byte |= (bits[byte_idx * 8 + 4] & 1) << 3;
-            byte |= (bits[byte_idx * 8 + 5] & 1) << 2;
-            byte |= (bits[byte_idx * 8 + 6] & 1) << 1;
-            byte |= (bits[byte_idx * 8 + 7] & 1) << 0;
-            output_data[byte_idx] = byte;
-        }
-    }
-};
-
-inline LDPCCodec::LDPCConfig make_ldpc_5041008_cfg() {
-    LDPCCodec::LDPCConfig c;
-    c.h_matrix_path = "../LDPC_504_1008.alist";
-    c.g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
-    c.decoder_iterations = 6;
-    c.n_frames = 16;
-    c.enc_type = "LDPC_H";
-    c.enc_g_method = "IDENTITY";
-    c.dec_type = "BP_HORIZONTAL_LAYERED";
-    c.dec_implem = "NMS";
-    c.dec_simd = "INTER";
-    c.use_custom_encoder = true;
-    return c;
 }
 
 #endif // COMMON_HPP

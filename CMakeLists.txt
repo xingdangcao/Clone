@@ -1,6 +1,25 @@
 cmake_minimum_required(VERSION 3.18)
 project(OFDM_Modulator CXX)
 
+# Optional CUDA support for GPU-accelerated builds
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    # Default: SM 70 (V100) + SM 86 (RTX 3080); override with -DCMAKE_CUDA_ARCHITECTURES=XX
+    if(NOT CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52")
+        set(CMAKE_CUDA_ARCHITECTURES 70 86)
+    endif()
+    find_library(CUFFT_LIBRARY cufft HINTS ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/../lib64 /usr/local/cuda/lib64)
+    message(STATUS "CUDA enabled — arch ${CMAKE_CUDA_ARCHITECTURES}, cufft: ${CUFFT_LIBRARY}")
+    set(CUDA_AVAILABLE TRUE)
+else()
+    message(STATUS "CUDA not found — GPU targets will not be built")
+    set(CUDA_AVAILABLE FALSE)
+endif()
+
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,6 +111,7 @@ add_executable(OFDMModulator
     ${OPENISAC_SRC_DIR}/OFDMModulator.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
 )
 
@@ -127,6 +147,7 @@ add_executable(OFDMDemodulator
     ${OPENISAC_SRC_DIR}/OFDMDemodulator.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
 )
 

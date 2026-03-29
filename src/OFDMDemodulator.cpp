@@ -18,8 +18,16 @@
 #include <memory>
 #include <utility>
 #include <Common.hpp>
+#include "LDPCCodec.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
+
+namespace {
+inline int64_t host_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+}
+} // namespace
 
 /**
  * @brief OFDM Receiver Engine.
@@ -251,10 +259,28 @@ private:
     struct LlrFrame {
         AlignedFloatVector llr;
         uint64_t generation = 0;
+        int64_t rx_enqueue_time_ns = 0;
+        int64_t process_dequeue_time_ns = 0;
+        int64_t demod_done_time_ns = 0;
+    };
+    struct LatencyAccumulator {
+        std::atomic<int64_t> rx_queue_total_ns{0};
+        std::atomic<int64_t> demod_total_ns{0};
+        std::atomic<int64_t> bit_total_ns{0};
+        std::atomic<int64_t> e2e_total_ns{0};
+        std::atomic<int> count{0};
+    };
+    struct LatencySnapshot {
+        int64_t rx_queue_total_ns{0};
+        int64_t demod_total_ns{0};
+        int64_t bit_total_ns{0};
+        int64_t e2e_total_ns{0};
+        int count{0};
     };
     SPSCRingBuffer<LlrFrame> _data_llr_buffer{128};  // LLR data buffer
     std::thread _bit_processing_thread;
     std::atomic<bool> _bit_processing_running{false};
+    LatencyAccumulator _latency_accumulator;
     
     LDPCCodec _ldpc_decoder{make_ldpc_5041008_cfg()};
     Scrambler _descrambler{201600, 0x5A};
@@ -280,6 +306,16 @@ private:
     AdaptiveCFOAKF _akf;
     size_t _ocxo_update_counter = 0;
     DemodControlTimeGates _control_time_gates;
+
+    LatencySnapshot _take_latency_snapshot_and_reset() {
+        LatencySnapshot snapshot;
+        snapshot.count = _latency_accumulator.count.exchange(0, std::memory_order_acq_rel);
+        snapshot.rx_queue_total_ns = _latency_accumulator.rx_queue_total_ns.exchange(0, std::memory_order_acq_rel);
+        snapshot.demod_total_ns = _latency_accumulator.demod_total_ns.exchange(0, std::memory_order_acq_rel);
+        snapshot.bit_total_ns = _latency_accumulator.bit_total_ns.exchange(0, std::memory_order_acq_rel);
+        snapshot.e2e_total_ns = _latency_accumulator.e2e_total_ns.exchange(0, std::memory_order_acq_rel);
+        return snapshot;
+    }
     
     void init_filter() {
         const std::vector<float> filter_coeffs = {
@@ -593,6 +629,8 @@ private:
      * used for timing adjustments during normal operation.
      */
     void handle_alignment(uhd::rx_metadata_t& md) {
+        const bool do_latency_profile =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         const size_t total_read = cfg_.samples_per_frame() + discard_samples_;
         AlignedVector temp_buf(total_read);
         size_t received = 0;
@@ -608,6 +646,7 @@ private:
         RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = discard_samples_;
         frame.usrp_time_ns = frame_time_ns;
+        frame.host_enqueue_time_ns = do_latency_profile ? host_now_ns() : 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
         if(discard_samples_ > 0)
         {
@@ -638,10 +677,13 @@ private:
      * for processing.
      */
     void handle_normal_rx(uhd::rx_metadata_t& md) {
+        const bool do_latency_profile =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         // Acquire pre-allocated RX frame from pool
         RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = 0;
         frame.usrp_time_ns = -1;
+        frame.host_enqueue_time_ns = 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
         size_t received = 0;
 
@@ -658,6 +700,9 @@ private:
         }
 
         if (received > 0) {
+            if (do_latency_profile) {
+                frame.host_enqueue_time_ns = host_now_ns();
+            }
             if (!frame_queue_.try_push(std::move(frame))) {
                 LOG_RT_WARN_HZ(5) << "RX frame queue full, dropping newest frame";
                 _rx_frame_pool.release(std::move(frame));
@@ -782,6 +827,8 @@ private:
         int frame_count = 0;
         constexpr int REPORT_INTERVAL = 434;
         SPSCBackoff sync_backoff;
+        const bool do_latency_profile =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
 
         while (running_.load()) {
             if (state_ == RxState::SYNC_SEARCH) {
@@ -802,7 +849,8 @@ private:
                     continue;
                 }
                 frame_start = Clock::now();
-                process_ofdm_frame(frame);
+                const int64_t frame_dequeue_time_ns = do_latency_profile ? host_now_ns() : 0;
+                process_ofdm_frame(frame, frame_dequeue_time_ns);
                 // Return frame to pool for reuse
                 _rx_frame_pool.release(std::move(frame));
                 frame_end = Clock::now();
@@ -821,6 +869,22 @@ private:
                         << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
                         << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
                         << " Hz; Average CFO: " << _avg_freq_offset << " Hz";
+                    if (do_latency_profile) {
+                        const LatencySnapshot latency = _take_latency_snapshot_and_reset();
+                        oss << "\n";
+                        if (latency.count > 0) {
+                            const double n = static_cast<double>(latency.count);
+                            oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
+                                << "RX frame queue wait:         " << (latency.rx_queue_total_ns / n) * 1e-6 << " ms\n"
+                                << "Dequeue + FFT/EQ/LLR queue:  " << (latency.demod_total_ns / n) * 1e-6 << " ms\n"
+                                << "Bit queue + LDPC/UDP out:    " << (latency.bit_total_ns / n) * 1e-6 << " ms\n"
+                                << "TOTAL E2E (excl. RX wait):   " << (latency.e2e_total_ns / n) * 1e-6 << " ms\n"
+                                << "Latency sample count:        " << latency.count << "\n";
+                        } else {
+                            oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
+                                << "No valid latency samples in this interval.\n";
+                        }
+                    }
                     LOG_RT_INFO() << oss.str();
                     total_processing_time = 0.0;
                     frame_count = 0;
@@ -865,7 +929,7 @@ private:
      * 5. Sensing: Extract Micro-Doppler signature and valid range/doppler data.
      * 6. LLR Calculation: Compute Log-Likelihood Ratios for soft decoding.
      */
-    void process_ofdm_frame(const RxFrame& frame) {
+    void process_ofdm_frame(const RxFrame& frame, int64_t frame_dequeue_time_ns) {
         // ============== Profiling variables ==============
         using ProfileClock = std::chrono::high_resolution_clock;
         static double prof_fft_total = 0.0;
@@ -881,6 +945,8 @@ private:
         static double prof_llr_total = 0.0;
         static int prof_frame_count = 0;
         constexpr int PROF_REPORT_INTERVAL = 434;
+        const bool do_latency_profile =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         
         auto prof_step_start = ProfileClock::now();
         auto prof_step_end = prof_step_start;
@@ -1299,7 +1365,14 @@ private:
         QPSK_LLR::compute_llr_to_buffer(symbols, data_indices, scale_llr, frame_llr.data());
         
         // Put LLR data into circular buffer
-        if (!spsc_wait_push(_data_llr_buffer, LlrFrame{std::move(frame_llr), frame.generation}, [this]() {
+        const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
+        if (!spsc_wait_push(_data_llr_buffer, LlrFrame{
+                std::move(frame_llr),
+                frame.generation,
+                frame.host_enqueue_time_ns,
+                frame_dequeue_time_ns,
+                demod_done_time_ns,
+            }, [this]() {
                 return !_bit_processing_running.load(std::memory_order_acquire);
             })) {
             _llr_pool.release(std::move(frame_llr));
@@ -1400,6 +1473,8 @@ private:
         std::vector<size_t> cpu_list = {cfg_.available_cores[core_idx]};
         uhd::set_thread_affinity(cpu_list);
         SPSCBackoff llr_backoff;
+        const bool do_latency_profile =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         
         while (_bit_processing_running.load()) {
             LlrFrame frame_llr;
@@ -1425,6 +1500,7 @@ private:
             // Process frame data, block by block according to decoder N (bits)
             size_t bits_per_block = _ldpc_decoder.get_N();
             size_t llr_offset = 0;
+            bool latency_recorded = false;
             while (llr_offset + bits_per_block <= frame_llr.llr.size()) {
                 // 1. Extract LLR of current block (corresponding to one LDPC code block)
                 LDPCCodec::AlignedFloatVector header_llr(bits_per_block);
@@ -1513,6 +1589,27 @@ private:
                             
                             // 12. Send UDP data
                             _udp_output_sender->send(udp_data.data(), udp_data.size());
+                            if (!latency_recorded &&
+                                do_latency_profile &&
+                                frame_llr.rx_enqueue_time_ns > 0 &&
+                                frame_llr.process_dequeue_time_ns > 0 &&
+                                frame_llr.demod_done_time_ns > 0) {
+                                const int64_t udp_done_time_ns = host_now_ns();
+                                _latency_accumulator.rx_queue_total_ns.fetch_add(
+                                    frame_llr.process_dequeue_time_ns - frame_llr.rx_enqueue_time_ns,
+                                    std::memory_order_relaxed);
+                                _latency_accumulator.demod_total_ns.fetch_add(
+                                    frame_llr.demod_done_time_ns - frame_llr.process_dequeue_time_ns,
+                                    std::memory_order_relaxed);
+                                _latency_accumulator.bit_total_ns.fetch_add(
+                                    udp_done_time_ns - frame_llr.demod_done_time_ns,
+                                    std::memory_order_relaxed);
+                                _latency_accumulator.e2e_total_ns.fetch_add(
+                                    udp_done_time_ns - frame_llr.process_dequeue_time_ns,
+                                    std::memory_order_relaxed);
+                                _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
+                                latency_recorded = true;
+                            }
                             // LOG_G_INFO() << "[Demod] Successfully reconstructed and sent UDP packet, size: " << udp_data.size() << " bytes" << std::endl;
 
                             llr_offset += required_llr; // Move past payload data
@@ -1551,7 +1648,7 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
         return 1;
     }
 
-    if (!std::filesystem::exists(default_config_file)) {
+    if (!path_exists(default_config_file)) {
         LOG_G_ERROR() << "Config file '" << default_config_file
                       << "' not found. Copy a sample file from the repository config directory, "
                       << "such as 'Demodulator_X310.yaml' or 'Demodulator_B210.yaml', to '" << default_config_file

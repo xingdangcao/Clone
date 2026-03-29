@@ -11,6 +11,14 @@
 
 namespace {
 
+inline bool should_profile_sensing(const Config& cfg) {
+    const bool sensing_enabled =
+        cfg.should_profile("sensing") ||
+        cfg.should_profile("sensing_proc") ||
+        cfg.should_profile("sensing_process");
+    return sensing_enabled && cfg.should_profile("latency");
+}
+
 uint64_t compute_rx_frame_seq_from_time(
     const uhd::time_spec_t& raw_start_time,
     const uhd::time_spec_t& stream_start_time,
@@ -36,6 +44,52 @@ uint64_t compute_rx_frame_seq_from_time(
                                           static_cast<double>(frame_samples)));
     return rounded_frame_seq > 0 ? static_cast<uint64_t>(rounded_frame_seq) : 0;
 }
+
+int32_t normalize_alignment_samples(int64_t samples, int64_t frame_samples) {
+    if (frame_samples <= 0) {
+        return 0;
+    }
+    int64_t normalized = samples % frame_samples;
+    if (normalized > frame_samples / 2) {
+        normalized -= frame_samples;
+    } else if (normalized < -(frame_samples / 2)) {
+        normalized += frame_samples;
+    }
+    normalized = std::clamp<int64_t>(
+        normalized,
+        static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
+        static_cast<int64_t>(std::numeric_limits<int32_t>::max()));
+    return static_cast<int32_t>(normalized);
+}
+
+int32_t compute_rx_frame_boundary_error_samples(
+    const uhd::time_spec_t& raw_start_time,
+    const uhd::time_spec_t& stream_start_time,
+    int32_t discard_samples,
+    const Config& cfg
+) {
+    if (cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0) {
+        return 0;
+    }
+
+    const uhd::time_spec_t aligned_start_time =
+        raw_start_time + uhd::time_spec_t(static_cast<double>(discard_samples) / cfg.sample_rate);
+    const double delta_samples =
+        (aligned_start_time - stream_start_time).get_real_secs() * cfg.sample_rate;
+    const int64_t rounded_samples = static_cast<int64_t>(std::llround(delta_samples));
+    const int64_t frame_samples = static_cast<int64_t>(cfg.samples_per_frame());
+    if (frame_samples <= 0) {
+        return 0;
+    }
+
+    const int64_t nearest_frame_seq =
+        static_cast<int64_t>(std::llround(static_cast<double>(rounded_samples) /
+                                          static_cast<double>(frame_samples)));
+    const int64_t residual = rounded_samples - nearest_frame_seq * frame_samples;
+    return normalize_alignment_samples(residual, frame_samples);
+}
+
+constexpr uint64_t kSystemDelayEstimationFrameInterval = 434;
 
 }
 
@@ -227,6 +281,7 @@ SensingChannel::RxIoContext::RxIoContext(const Config& cfg, const SensingRxChann
         logical_id_,
         cfg.samples_per_frame()
     )),
+    target_alignment(c.alignment),
     discard_samples(c.alignment) {}
 
 SensingChannel::RxIoContext::~RxIoContext() = default;
@@ -314,7 +369,9 @@ SensingChannel::SensingChannel(
 
     if (_compute.delay_estimation_enabled && _compute.sensing_pipeline_disabled_by_mode) {
         LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
-                  << "] enable_system_delay_estimation=1, sensing pipeline disabled for this run."
+                  << "] enable_system_delay_estimation=1, sensing pipeline disabled; "
+                  << "system delay estimation runs every "
+                  << kSystemDelayEstimationFrameInterval << " frames."
                   ;
     } else if (_rx_io.channel_cfg.enable_system_delay_estimation && !_compute.delay_estimation_enabled) {
         LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
@@ -331,7 +388,7 @@ SensingChannel::~SensingChannel() {
 void SensingChannel::start(const uhd::time_spec_t& start_time) {
     _stop_requested.store(false, std::memory_order_relaxed);
     _compute.bistatic_active = false;
-    _compute.delay_estimation_one_shot_done = false;
+    _compute.next_delay_estimation_frame_seq = 0;
     _rx_io.stream_start_time = start_time;
     _rx_io.next_rx_frame_seq = 0;
     _compute.sensing_sender.start();
@@ -411,6 +468,7 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
         }
         if (_compute.next_symbol_to_sample >= frame_end) break;
 
+        const auto gather_start = std::chrono::steady_clock::now();
         const size_t symbol_idx = static_cast<size_t>(_compute.next_symbol_to_sample - frame_start);
         if (symbol_idx >= symbols_in_frame) {
             break;
@@ -439,6 +497,8 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
         _compute.accumulated_rx_symbols.push_back(std::move(rx_symbol));
         _compute.accumulated_tx_symbols.push_back(frame.tx_symbols[symbol_idx]);
         _compute.next_symbol_to_sample += _compute.active_stride;
+        _compute.pending_batch_gather_us += std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - gather_start).count();
 
         if (_compute.accumulated_tx_symbols.size() >= _cfg.sensing_symbol_num) {
             SensingFrame sensing_frame;
@@ -449,9 +509,24 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
 
             const uint64_t first_symbol = _compute.current_batch_first_symbol;
             _compute.batch_has_first_symbol = false;
-            _sensing_process_freq(sensing_frame, first_symbol);
+            const double gather_us = _compute.pending_batch_gather_us;
+            _compute.pending_batch_gather_us = 0.0;
+            _sensing_process_freq(sensing_frame, first_symbol, gather_us);
         }
     }
+}
+
+void SensingChannel::set_target_alignment(int32_t samples) {
+    const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());
+    if (frame_samples > 0 && samples != 0 && (samples % frame_samples) == 0) {
+        LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
+                  << "] target ALGN equals an integer number of frames: samples="
+                  << samples << ", frame_samples=" << frame_samples
+                  << ", frame_shift=" << (samples / frame_samples);
+    }
+    _rx_io.target_alignment.store(samples);
+    LOG_G_INFO() << "Set target ALGN for channel " << _rx_io.logical_id
+              << ": " << samples << " samples";
 }
 
 void SensingChannel::set_alignment(int32_t samples) {
@@ -497,6 +572,10 @@ void SensingChannel::apply_shared_cfg(const SharedSensingRuntime& snapshot) {
 
 uint32_t SensingChannel::logical_id() const {
     return _rx_io.logical_id;
+}
+
+int32_t SensingChannel::target_alignment() const {
+    return _rx_io.target_alignment.load(std::memory_order_relaxed);
 }
 
 const SensingRxChannelConfig& SensingChannel::channel_cfg() const {
@@ -841,6 +920,30 @@ void SensingChannel::_handle_normal_rx() {
 
     if (!_running_ref.load(std::memory_order_relaxed)) return;
 
+    if (have_first_time) {
+        const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());
+        const int32_t desired_alignment = _rx_io.target_alignment.load(std::memory_order_relaxed);
+        const int32_t current_alignment = _rx_io.discard_samples.load(std::memory_order_relaxed);
+        const int32_t frame_offset = compute_rx_frame_boundary_error_samples(
+            first_time_spec,
+            _rx_io.stream_start_time,
+            0,
+            _cfg);
+        const int32_t correction = normalize_alignment_samples(
+            static_cast<int64_t>(desired_alignment) - static_cast<int64_t>(frame_offset),
+            frame_samples);
+        if (correction != 0) {
+            LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
+                              << "] RX frame boundary mismatch: offset=" << frame_offset
+                              << ", target_ALGN=" << desired_alignment
+                              << ", last_ALGN=" << current_alignment
+                              << ", correction=" << correction;
+            set_alignment(correction);
+            _rx_io.rx_frame_pool.release(std::move(rx_frame));
+            return;
+        }
+    }
+
     const uint64_t frame_seq = have_first_time
         ? compute_rx_frame_seq_from_time(
             first_time_spec,
@@ -877,7 +980,8 @@ void SensingChannel::_sensing_loop() {
 
         const auto now = std::chrono::steady_clock::now();
         _send_heartbeat_if_due(now);
-        if (!_compute.delay_estimation_one_shot_done) {
+        if (_compute.delay_estimation_enabled &&
+            tx_frame.frame_seq >= _compute.next_delay_estimation_frame_seq) {
             _estimate_system_delay(rx_frame_data, tx_frame.frame_seq);
         }
         if (_compute.sensing_pipeline_disabled_by_mode) {
@@ -899,6 +1003,7 @@ void SensingChannel::_sensing_loop() {
             }
             if (_compute.next_symbol_to_sample >= frame_end) break;
 
+            const auto gather_start = std::chrono::steady_clock::now();
             const size_t symbol_idx = static_cast<size_t>(_compute.next_symbol_to_sample - frame_start);
             AlignedVector rx_symbol(_cfg.fft_size);
             const size_t symbol_start = symbol_idx * (_cfg.fft_size + _cfg.cp_length) + _cfg.cp_length;
@@ -916,6 +1021,8 @@ void SensingChannel::_sensing_loop() {
             _compute.accumulated_rx_symbols.push_back(std::move(rx_symbol));
             _compute.accumulated_tx_symbols.push_back(tx_symbols[symbol_idx]);
             _compute.next_symbol_to_sample += _compute.active_stride;
+            _compute.pending_batch_gather_us += std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - gather_start).count();
 
             if (_compute.accumulated_tx_symbols.size() >= _cfg.sensing_symbol_num) {
                 SensingFrame sensing_frame;
@@ -926,7 +1033,9 @@ void SensingChannel::_sensing_loop() {
 
                 const uint64_t first_symbol = _compute.current_batch_first_symbol;
                 _compute.batch_has_first_symbol = false;
-                _sensing_process(sensing_frame, first_symbol);
+                const double gather_us = _compute.pending_batch_gather_us;
+                _compute.pending_batch_gather_us = 0.0;
+                _sensing_process(sensing_frame, first_symbol, gather_us);
             }
         }
 
@@ -978,7 +1087,7 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
     const int32_t alignment_now = _rx_io.discard_samples.load(std::memory_order_relaxed);
     const int64_t suggested_alignment_raw = static_cast<int64_t>(alignment_now) + delay_samples;
 
-    _compute.delay_estimation_one_shot_done = true;
+    _compute.next_delay_estimation_frame_seq = frame_seq + kSystemDelayEstimationFrameInterval;
 
     LOG_RT_INFO() << "[SYSDLY CH " << _rx_io.logical_id
                   << "] frame_seq=" << frame_seq
@@ -988,10 +1097,12 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
                   << ", corr_ratio=" << corr_ratio
                   << ", alignment_now=" << alignment_now
                   << ", alignment_suggest=" << suggested_alignment_raw
-                  << ", one_shot=done";
+                  << ", next_frame_seq=" << _compute.next_delay_estimation_frame_seq
+                  << ", interval=" << kSystemDelayEstimationFrameInterval;
 }
 
-void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_symbol_index) {
+void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
+    using ProfileClock = std::chrono::steady_clock;
     auto now = std::chrono::steady_clock::now();
     if (now < _compute.next_send_time) {
         return;
@@ -1009,6 +1120,7 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
     const int plan_output_alignment = fftwf_alignment_of(
         reinterpret_cast<float*>(_compute.demod_fft_out.data())
     );
+    const auto prep_start = ProfileClock::now();
     for (size_t i = 0; i < symbol_count; ++i) {
         if (i >= doppler_slots) {
             continue;
@@ -1038,36 +1150,99 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
         }
     }
 
-    _sensing_process_finalize(frame.tx_symbols, first_symbol_index);
+    const double prep_us = std::chrono::duration<double, std::micro>(
+        ProfileClock::now() - prep_start).count();
+    _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us);
 }
 
-void SensingChannel::_sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index) {
+void SensingChannel::_sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
+    using ProfileClock = std::chrono::steady_clock;
     auto now = std::chrono::steady_clock::now();
     if (now < _compute.next_send_time) {
         return;
     }
 
+    const auto prep_start = ProfileClock::now();
     _compute.sensing_core.copy_symbols_to_buffer(frame.rx_symbols);
-    _sensing_process_finalize(frame.tx_symbols, first_symbol_index);
+    const double prep_us = std::chrono::duration<double, std::micro>(
+        ProfileClock::now() - prep_start).count();
+    _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us);
 }
 
 void SensingChannel::_sensing_process_finalize(
     const std::vector<AlignedVector>& tx_symbols,
-    uint64_t first_symbol_index
+    uint64_t first_symbol_index,
+    double gather_us,
+    double prep_us
 ) {
+    using ProfileClock = std::chrono::steady_clock;
+    const bool do_prof = should_profile_sensing(_cfg);
     auto& channel_buf = _compute.sensing_core.channel_buffer();
+    const auto chest_start = ProfileClock::now();
     _compute.sensing_core.channel_estimate_with_shift(tx_symbols);
+    const double chest_shift_us = std::chrono::duration<double, std::micro>(
+        ProfileClock::now() - chest_start).count();
+    const auto mti_start = ProfileClock::now();
     _compute.sensing_core.apply_mti(_compute.active_enable_mti);
+    const double mti_us = std::chrono::duration<double, std::micro>(
+        ProfileClock::now() - mti_start).count();
 
+    double windows_fft_us = 0.0;
     if (!_compute.active_skip_sensing_fft) {
+        const auto fft_start = ProfileClock::now();
         _compute.sensing_core.apply_windows(channel_buf, _compute.range_window, _compute.doppler_window);
         _compute.sensing_core.execute_range_ifft();
         _compute.sensing_core.execute_doppler_fft();
+        windows_fft_us = std::chrono::duration<double, std::micro>(
+            ProfileClock::now() - fft_start).count();
     }
 
+    const auto send_start = ProfileClock::now();
     _compute.sensing_sender.push_data(channel_buf, first_symbol_index);
+    const double send_us = std::chrono::duration<double, std::micro>(
+        ProfileClock::now() - send_start).count();
     if (_cfg.range_fft_size != _cfg.fft_size || _cfg.doppler_fft_size != _cfg.fft_size) {
         _compute.sensing_core.clear_channel_buffer();
+    }
+
+    if (do_prof) {
+        _compute.prof_gather_total_us += gather_us;
+        _compute.prof_prep_total_us += prep_us;
+        _compute.prof_chest_shift_total_us += chest_shift_us;
+        _compute.prof_mti_total_us += mti_us;
+        _compute.prof_windows_fft_total_us += windows_fft_us;
+        _compute.prof_send_total_us += send_us;
+        _compute.prof_batch_count++;
+
+        constexpr uint64_t PROF_REPORT_INTERVAL = 64;
+        if (_compute.prof_batch_count >= PROF_REPORT_INTERVAL) {
+            const double n = static_cast<double>(_compute.prof_batch_count);
+            const double total_latency_us =
+                _compute.prof_prep_total_us +
+                _compute.prof_chest_shift_total_us +
+                _compute.prof_mti_total_us +
+                _compute.prof_windows_fft_total_us;
+            std::ostringstream oss;
+            oss << "\n========== Sensing CH " << _rx_io.logical_id
+                << " Profiling (avg per batch, us) ==========\n"
+                << "Batch gather:            " << _compute.prof_gather_total_us / n << " us\n"
+                << "RX symbol prep:          " << _compute.prof_prep_total_us / n << " us\n"
+                << "ChEst + Shift:           " << _compute.prof_chest_shift_total_us / n << " us\n"
+                << "MTI:                     " << _compute.prof_mti_total_us / n << " us\n"
+                << "Windows+IFFT+DopFFT:     " << _compute.prof_windows_fft_total_us / n << " us\n"
+                << "Send queue push:         " << _compute.prof_send_total_us / n << " us\n"
+                << "TOTAL LATENCY (excl. gather/send): " << total_latency_us / n << " us\n"
+                << "Profile batch count:     " << _compute.prof_batch_count << "\n"
+                << "========================================================\n";
+            LOG_RT_INFO() << oss.str();
+            _compute.prof_gather_total_us = 0.0;
+            _compute.prof_prep_total_us = 0.0;
+            _compute.prof_chest_shift_total_us = 0.0;
+            _compute.prof_mti_total_us = 0.0;
+            _compute.prof_windows_fft_total_us = 0.0;
+            _compute.prof_send_total_us = 0.0;
+            _compute.prof_batch_count = 0;
+        }
     }
 
     _compute.next_send_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);

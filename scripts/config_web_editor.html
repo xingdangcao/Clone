@@ -760,6 +760,25 @@
       return null;
     }
 
+    function makeSensingChannelItem(field, index, existingItems) {
+      const baseSource = existingItems[0] && typeof existingItems[0] === 'object'
+        ? structuredClone(existingItems[0])
+        : structuredClone(field.default_item || {});
+      const item = {};
+      for (const sub of (field.item_fields || [])) {
+        if (Object.prototype.hasOwnProperty.call(baseSource, sub.key)) {
+          item[sub.key] = baseSource[sub.key];
+        } else {
+          item[sub.key] = sub.kind === 'bool' ? false : '';
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(item, 'usrp_channel')) {
+        const baseChannel = parseIntOrNull(baseSource.usrp_channel);
+        item.usrp_channel = baseChannel === null ? index : baseChannel + index;
+      }
+      return item;
+    }
+
     function ensureSensingChannelItems() {
       const model = currentModel();
       if (!model) return;
@@ -770,13 +789,8 @@
       const count = Math.max(0, parseIntOrNull(countRaw) ?? 0);
       const items = Array.isArray(field.items) ? field.items : [];
       field.items = items;
-      const template = items[0] ? structuredClone(items[0]) : (() => {
-        const obj = {};
-        for (const sub of (field.item_fields || [])) obj[sub.key] = '';
-        return obj;
-      })();
       while (items.length < count) {
-        items.push(structuredClone(template));
+        items.push(makeSensingChannelItem(field, items.length, items));
       }
       while (items.length > count) {
         items.pop();

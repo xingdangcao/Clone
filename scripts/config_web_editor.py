@@ -47,7 +47,23 @@ FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
             "type": "mapping_list",
             "key": "sensing_rx_channels",
             "comment": "",
-            "item_fields": [],
+            "item_fields": [
+                {"key": "usrp_channel", "comment": "USRP RX channel index for this sensing path", "kind": "int"},
+                {"key": "device_args", "comment": "Per-channel USRP args override (optional)", "kind": "string"},
+                {"key": "clock_source", "comment": "Per-channel clock source override (optional)", "kind": "string"},
+                {"key": "time_source", "comment": "Per-channel time source override (optional)", "kind": "string"},
+                {"key": "wire_format_rx", "comment": "Per-channel wire format override (optional)", "kind": "string"},
+                {"key": "rx_gain", "comment": "Per-channel RX gain (dB)", "kind": "int"},
+                {"key": "alignment", "comment": "Per-channel timing alignment offset (samples)", "kind": "int"},
+                {"key": "rx_antenna", "comment": "RX antenna port (e.g. RX1/RX2/TX/RX)", "kind": "string"},
+                {
+                    "key": "enable_system_delay_estimation",
+                    "comment": "If true, this channel runs delay estimation only and disables sensing pipeline",
+                    "kind": "bool",
+                },
+                {"key": "sensing_ip", "comment": "Per-channel sensing output IP", "kind": "string"},
+                {"key": "sensing_port", "comment": "Per-channel sensing output port", "kind": "int"},
+            ],
         },
     },
     "sensing_symbol_num": {
@@ -83,6 +99,13 @@ FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+
+def int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
 def load_html_page() -> str:
@@ -466,6 +489,104 @@ def append_missing_layout_fields(
     return layout_copy
 
 
+def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    layout_copy = copy.deepcopy(layout)
+    fallback_item_fields = {
+        field["key"]: field
+        for field in FALLBACK_LAYOUT_FIELDS["sensing_rx_channels"]["field"]["item_fields"]
+    }
+    for section in layout_copy:
+        for field in section["fields"]:
+            if field.get("type") != "mapping_list" or field.get("key") != "sensing_rx_channels":
+                continue
+            merged_item_fields: list[dict[str, Any]] = []
+            seen_keys: set[str] = set()
+            for item_field in field.get("item_fields", []):
+                item_key = item_field.get("key")
+                if not item_key or item_key in seen_keys:
+                    continue
+                merged_field = copy.deepcopy(fallback_item_fields.get(item_key, {}))
+                merged_field.update(item_field)
+                merged_item_fields.append(merged_field)
+                seen_keys.add(item_key)
+            for item_key, fallback_field in fallback_item_fields.items():
+                if item_key in seen_keys:
+                    continue
+                merged_item_fields.append(copy.deepcopy(fallback_field))
+            field["item_fields"] = merged_item_fields
+    return layout_copy
+
+
+def default_sensing_channel_item(
+    data: dict[str, Any],
+    index: int,
+    base_item: dict[str, Any] | None = None,
+    preserve_usrp_channel: bool = False,
+) -> dict[str, Any]:
+    base = base_item if isinstance(base_item, dict) else {}
+    fallback_item = {
+        "usrp_channel": 1,
+        "device_args": "",
+        "clock_source": "",
+        "time_source": "",
+        "wire_format_rx": "",
+        "rx_gain": 30,
+        "alignment": 63,
+        "rx_antenna": "RX2",
+        "enable_system_delay_estimation": False,
+        "sensing_ip": "127.0.0.1",
+        "sensing_port": 8888,
+    }
+    base_usrp_channel = int_or_default(base.get("usrp_channel"), fallback_item["usrp_channel"])
+    default_ip = str(
+        base.get("sensing_ip")
+        or data.get("mono_sensing_ip")
+        or data.get("default_ip")
+        or fallback_item["sensing_ip"]
+    )
+    sensing_port_raw = base.get("sensing_port")
+    if sensing_port_raw in (None, ""):
+        sensing_port_raw = data.get("mono_sensing_port", fallback_item["sensing_port"])
+    usrp_channel = base_usrp_channel if preserve_usrp_channel else base_usrp_channel + index
+
+    return {
+        "usrp_channel": usrp_channel,
+        "device_args": str(base.get("device_args", fallback_item["device_args"])),
+        "clock_source": str(base.get("clock_source", fallback_item["clock_source"])),
+        "time_source": str(base.get("time_source", fallback_item["time_source"])),
+        "wire_format_rx": str(base.get("wire_format_rx", fallback_item["wire_format_rx"])),
+        "rx_gain": int_or_default(base.get("rx_gain"), fallback_item["rx_gain"]),
+        "alignment": int_or_default(base.get("alignment"), fallback_item["alignment"]),
+        "rx_antenna": str(base.get("rx_antenna", fallback_item["rx_antenna"])),
+        "enable_system_delay_estimation": bool(base.get(
+            "enable_system_delay_estimation",
+            fallback_item["enable_system_delay_estimation"],
+        )),
+        "sensing_ip": default_ip,
+        "sensing_port": int_or_default(sensing_port_raw, fallback_item["sensing_port"]),
+    }
+
+
+def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> list[dict[str, Any]]:
+    count = max(0, int_or_zero(data.get("sensing_rx_channel_count", 0)))
+    dict_items = [item for item in items if isinstance(item, dict)]
+    if count == 0:
+        return []
+    base_item = dict_items[0] if dict_items else None
+    normalized: list[dict[str, Any]] = []
+    for index in range(count):
+        if index < len(dict_items):
+            normalized.append(default_sensing_channel_item(
+                data,
+                index,
+                dict_items[index],
+                preserve_usrp_channel=True,
+            ))
+            continue
+        normalized.append(default_sensing_channel_item(data, index, base_item))
+    return normalized
+
+
 def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Path]:
     exists = path.exists()
     source = path if exists else next((candidate for candidate in fallback_paths if candidate.exists()), path)
@@ -483,6 +604,7 @@ def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple
         fallback_paths,
         ("sensing_rx_channels", "range_fft_size", "doppler_fft_size", "sensing_symbol_num", "profiling_modules"),
     )
+    layout = enrich_mapping_list_layouts(layout)
     known_keys = {field["key"] for section in layout for field in section["fields"]}
     extra_keys = [key for key in data.keys() if key not in known_keys]
     if extra_keys:
@@ -511,6 +633,8 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 items = copy.deepcopy(data.get(key, []) or [])
                 if not isinstance(items, list):
                     items = []
+                if key == "sensing_rx_channels":
+                    items = normalized_sensing_channel_items(data, items)
                 item_fields = []
                 for item_field in field["item_fields"]:
                     sample_value = ""
@@ -522,16 +646,25 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                         "key": item_field["key"],
                         "comment": item_field.get("comment", ""),
                         "display_comment": display_comment_override(item_field["key"], item_field.get("comment", "")),
-                        "kind": detect_kind(sample_value),
+                        "kind": item_field.get("kind") or detect_kind(sample_value),
                     })
-                section_payload["fields"].append({
+                field_payload = {
                     "type": "mapping_list",
                     "key": key,
                     "comment": field.get("comment", ""),
                     "display_comment": display_comment_override(key, field.get("comment", "")),
                     "item_fields": item_fields,
                     "items": items,
-                })
+                }
+                if key == "sensing_rx_channels":
+                    base_item = items[0] if items else None
+                    field_payload["default_item"] = default_sensing_channel_item(
+                        data,
+                        0,
+                        base_item,
+                        preserve_usrp_channel=True,
+                    )
+                section_payload["fields"].append(field_payload)
                 continue
 
             if key == "profiling_modules":
@@ -701,14 +834,10 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
         raise RuntimeError("Invalid cpu_cores payload.")
     result["cpu_cores"] = [int_or_zero(v) for v in cpu_values if str(v).strip() != ""]
     if tab_name == "modulator":
-        count = max(0, int_or_zero(result.get("sensing_rx_channel_count", 0)))
         channels = result.get("sensing_rx_channels", []) or []
-        while len(channels) < count:
-            template = copy.deepcopy(channels[0]) if channels else {}
-            channels.append(template)
-        while len(channels) > count:
-            channels.pop()
-        result["sensing_rx_channels"] = channels
+        if not isinstance(channels, list):
+            channels = []
+        result["sensing_rx_channels"] = normalized_sensing_channel_items(result, channels)
     return result
 
 
@@ -918,7 +1047,10 @@ class ConfigEditorApp:
                 yaml_path=build_dir / "Modulator.yaml",
                 cwd=build_dir,
                 default_command="./OFDMModulator",
-                presets=({"label": "CPU Modulator", "command": "./OFDMModulator"},),
+                presets=(
+                    {"label": "CPU Modulator", "command": "./OFDMModulator"},
+                    {"label": "CUDA Modulator", "command": "./CUDAOFDMModulator"},
+                ),
                 sample_candidates=(
                     repo_root / "config" / "Modulator_X310.yaml",
                     repo_root / "config" / "Modulator_B210.yaml",
@@ -930,7 +1062,10 @@ class ConfigEditorApp:
                 yaml_path=build_dir / "Demodulator.yaml",
                 cwd=build_dir,
                 default_command="./OFDMDemodulator",
-                presets=({"label": "CPU Demodulator", "command": "./OFDMDemodulator"},),
+                presets=(
+                    {"label": "CPU Demodulator", "command": "./OFDMDemodulator"},
+                    {"label": "CUDA Demodulator", "command": "./CUDAOFDMDemodulator"},
+                ),
                 sample_candidates=(
                     repo_root / "config" / "Demodulator_X310.yaml",
                     repo_root / "config" / "Demodulator_B210.yaml",
