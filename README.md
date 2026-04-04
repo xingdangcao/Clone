@@ -455,20 +455,21 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 Then open `http://<your-host>:8765` in a browser.
 
 What it does:
-* Provides separate Modulator / Demodulator tabs, plus a dedicated `Resource Planner` tab for `data_resource_blocks`.
+* Provides separate Modulator / Demodulator tabs, plus a `Resource Planner` tab for `data_resource_blocks` and a `Sensing Resource Map` tab for `sensing_mask_blocks`.
 * Edits `build/Modulator.yaml` and `build/Demodulator.yaml` as parameter/value forms instead of a raw YAML text area.
 * Provides a dedicated CPU-binding editor for `cpu_cores`, with thread names, generated comments, and per-thread CPU selection.
 * Saves the current form back to YAML and starts/stops modulator and demodulator processes from the `build/` directory.
 * Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
 * Includes command presets and a custom command field for each tab.
-* Lets you draw payload rectangles on a large time-frequency planner canvas, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
+* Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `sensing_mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
 * Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
 Notes:
 * Default commands are `./OFDMModulator` and `./OFDMDemodulator`.
 * The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
-* The `Resource Planner` tab edits `data_resource_blocks` only. Use `Apply to Transmitter` to write the current planner state into `build/Modulator.yaml`, and `Apply to Receiver` to write it into `build/Demodulator.yaml`.
-* The planner intentionally allows TX and RX to differ while you are experimenting, but normal operation still expects matching `data_resource_blocks` on both sides.
+* `Resource Planner` edits `data_resource_blocks`: it decides which RE carry payload and which RE are reserved as `sensing_pilot`.
+* `Sensing Resource Map` edits `sensing_mask_blocks`: it decides which RE are exported on the compact sensing path when `sensing_output_mode=compact_mask`.
+* Both planners can be applied to either side. During experiments TX and RX may differ temporarily, but normal operation still expects matching `data_resource_blocks` on both sides.
 * If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.
 * If `Enable runtime CPU isolation` is on, the console uses the current `cpu_cores` list to derive the default isolated CPU set and calls `scripts/isolate_cpus.bash` before launch.
 * If `Override CPU isolation list` is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.
@@ -497,8 +498,8 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_output_mode` | `string` | `dense` | Sensing UDP output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
 | `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
-| `data_resource_blocks` | `object[]` | omitted | Optional payload resource rectangles. Omit the key to keep legacy full-grid payload mapping; set `[]` to disable payload RE entirely. Each block uses `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`; only selected non-sync, non-pilot RE carry real payload, and all other non-sync, non-pilot RE transmit pre-generated QPSK. |
-| `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing RE rectangles. Used only when `sensing_output_mode=compact_mask`. Blocks use absolute frame symbol indices and raw FFT-bin indices, allow sync/pilot RE, are unioned on overlap, and are emitted in symbol-major then subcarrier-major order. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, compact sensing can also enable runtime MTI and local Delay-Doppler processing. |
+| `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-sync, non-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit the known sync-sequence value instead, so they stay predictable for sensing and are excluded from payload mapping. Any remaining non-sync, non-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
+| `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `sensing_output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. Sync / pilot RE are allowed here, overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
 | `tx_device_args` | `string` | `""` | TX-specific USRP args. |
 | `rx_device_args` | `string` | `""` | Default sensing RX USRP args. |
@@ -528,9 +529,14 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `data_ingest`, `sensing_proc`, and `sensing_process`; `all` enables every module. Modulator end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. Size this list for the TX thread, modulation thread, data-ingest thread, each enabled sensing channel's RX/sensing threads, and the main thread. If cores are limited, keep one dedicated core for the main thread first, then prioritize the TX and sensing RX threads, and only after that the modulation/data-ingest/sensing-processing threads because the latter stages have deeper buffers. |
 
-If `data_resource_blocks` is enabled, copy the same rectangles into `Demodulator.yaml`; `sync_pos` and `pilot_positions` still take precedence over overlapping payload rectangles.
+Quick mental model:
+* `data_resource_blocks` decides where communication data goes.
+* `sensing_mask_blocks` decides which RE are exported for compact sensing.
+* The first affects payload mapping; the second affects sensing output only.
 
-When `sensing_output_mode=compact_mask`, sensing switches to one UDP frame per OFDM frame and only the selected RE channel estimates are sent in compact mode. `STRD` remains ignored because the stride is defined implicitly by `sensing_mask_blocks`. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, runtime `MTI` and `SKIP` are enabled: `SKIP=1` keeps the compact raw-RE payload, while `SKIP=0` switches back to the existing dense Delay-Doppler output. For that regular compact mode, config normalization expands `range_fft_size` to at least the selected subcarrier count and `doppler_fft_size` to at least the selected sensing symbol count. The compact sensing UDP payload begins with `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`, followed by `re_count` raw `complex<float>` values in the configured fixed order. Existing `plot_sensing*.py` viewers do not parse this compact payload yet.
+If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `Demodulator.yaml`. If a block overlaps `sync_pos` or `pilot_positions`, the built-in sync / pilot RE still take precedence.
+
+When `sensing_output_mode=compact_mask`, sensing sends one compact UDP packet per OFDM frame and includes only the RE selected by `sensing_mask_blocks`. In this mode `STRD` is ignored, because the mask itself defines the sampling pattern. If the mask is "regular" (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime `MTI` and local Delay-Doppler processing can also be enabled: `SKIP=1` keeps the raw compact RE output, while `SKIP=0` switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands `range_fft_size` and `doppler_fft_size` when needed so they cover the selected subcarriers and symbols. The compact sensing UDP payload begins with `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`, followed by `re_count` raw `complex<float>` values in fixed order. Existing `plot_sensing*.py` viewers cannot handle non-"regular" compact payloads yet.
 
 `sensing_rx_channels` object fields:
 
@@ -586,8 +592,8 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `range_fft_size` | `int` | `1024` | Range FFT size. |
 | `doppler_fft_size` | `int` | `100` | Doppler FFT size. |
 | `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
-| `data_resource_blocks` | `object[]` | omitted | Optional payload resource rectangles. Omit the key to keep legacy full-grid payload extraction; set `[]` to extract no payload LLR. Each block uses `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`, and the effective payload RE are the selected rectangles after removing `sync_pos` and `pilot_positions`. This setting must match `Modulator.yaml` when enabled. |
-| `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing RE rectangles. Used only when `sensing_output_mode=compact_mask`. Blocks use absolute frame symbol indices and raw FFT-bin indices, allow sync/pilot RE, are unioned on overlap, and are emitted in symbol-major then subcarrier-major order. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, compact sensing can also enable runtime MTI and local Delay-Doppler processing. |
+| `data_resource_blocks` | `object[]` | omitted | Receiver-side communication resource map. It answers: "which RE should be interpreted as payload?" Omit the key to keep the legacy behavior, where every non-sync, non-pilot RE is treated as payload. Set `[]` to extract no payload LLR at all. Use the same rectangles and `kind` values as the transmitter. Blocks with `kind: payload` produce payload LLR; blocks with `kind: sensing_pilot` are treated as known reference RE instead and are excluded from payload extraction. |
+| `sensing_mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the modulator side: absolute frame-symbol index, raw FFT-bin index, sync / pilot RE allowed, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | USRP device args. |
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
 | `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
@@ -636,7 +642,11 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `agc`, `align`, and `snr`; `all` enables every module. `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, and `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates from the active demodulator path. |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. If cores are limited, keep one dedicated core for the main thread first, then prioritize `rx_proc`, and only after that `process_proc`, `sensing_process_proc`, and `bit_processing_proc`, because those later stages have larger buffers and can better tolerate short scheduling jitter. |
 
-When `sensing_output_mode=compact_mask`, bistatic sensing also switches to one UDP frame per OFDM frame and only the selected RE channel estimates are sent in compact mode. `STRD` remains ignored because the stride is defined implicitly by `sensing_mask_blocks`. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, runtime `MTI` and `SKIP` are enabled: `SKIP=1` keeps the compact raw-RE payload, while `SKIP=0` switches back to the existing dense Delay-Doppler output. For that regular compact mode, config normalization expands `range_fft_size` to at least the selected subcarrier count and `doppler_fft_size` to at least the selected sensing symbol count. The compact payload uses the same `CompactSensingFrameHeader` and fixed RE ordering as the modulator side.
+Receiver-side note:
+* `data_resource_blocks` should normally match the transmitter exactly, including `kind`.
+* In `compact_mask` mode, bistatic sensing also sends one compact UDP packet per OFDM frame and includes only the RE selected by `sensing_mask_blocks`.
+* `STRD` is ignored in this mode because the mask already defines the sampling pattern.
+* The compact payload format is the same as on the modulator side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
 
 Notes:
 * RX AGC has two phases. During `SYNC_SEARCH`, the receiver resets gain to the configured `rx_gain` and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered `delay_spectrum` peak window defined by `rx_agc_low_threshold_db` and `rx_agc_high_threshold_db`.
