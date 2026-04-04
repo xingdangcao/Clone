@@ -338,8 +338,14 @@ pip install -r requirements.txt
 *   **Windows:** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH, or place executable in the working directory.
  
 #### Enable GPU Acceleration (Optional)
+ 
+If an Nvidia GPU is available, install `cupy-cuda12x` to enable GPU acceleration:
 
-Some fast plotting scripts can use an optional GPU array backend when it is available in the active Python environment. If no optional backend is installed, the scripts automatically fall back to CPU execution.
+> **Note:** Please ensure that the CUDA Toolkit is installed before installing CuPy.
+ 
+```bash
+pip install cupy-cuda12x
+```
 
 #### Enable Intel Integrated GPU Acceleration (Optional)
 
@@ -375,9 +381,9 @@ If the installation is successful, you should see output similar to:
 
 ##### 4. Usage Notes
 
-The OpenISAC frontend automatically detects available array backends. The priority order is:
-1. CuPy backend
-2. dpnp backend
+The OpenISAC frontend automatically detects available GPU backends. The priority order is:
+1. Nvidia GPU (CUDA)
+2. Intel iGPU (dpnp)
 3. CPU (fallback)
 
 No code modifications are required; the system will automatically select the best available backend.
@@ -461,12 +467,12 @@ What it does:
 * Provides a dedicated CPU-binding editor for `cpu_cores`, with thread names, generated comments, and per-thread CPU selection.
 * Saves the current form back to YAML and starts/stops modulator and demodulator processes from the `build/` directory.
 * Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
-* Includes command presets and a custom command field for each tab.
+* Includes CPU/CUDA command presets and a custom command field for each tab.
 * Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `sensing_mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
 * Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
 Notes:
-* Default commands are `./OFDMModulator` and `./OFDMDemodulator`.
+* Default commands are `./OFDMModulator` and `./OFDMDemodulator`; switch to the CUDA preset if needed.
 * The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
 * `Resource Planner` edits `data_resource_blocks`: it decides which RE carry payload and which RE are reserved as `sensing_pilot`.
 * `Sensing Resource Map` edits `sensing_mask_blocks`: it decides which RE are exported on the compact sensing path when `sensing_output_mode=compact_mask`.
@@ -498,6 +504,7 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `zc_root` | `int` | `29` | Zadoff-Chu root index. |
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_output_mode` | `string` | `dense` | Sensing UDP output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
+| `cuda_mod_pipeline_slots` | `int` | `2` | Number of CUDA modulation pipeline slots. Values below `1` are clamped to `1`. |
 | `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
 | `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-sync, non-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit the known sync-sequence value instead, so they stay predictable for sensing and are excluded from payload mapping. Any remaining non-sync, non-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
 | `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `sensing_output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. Sync / pilot RE are allowed here, overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
@@ -520,7 +527,7 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `sensing_rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for outputs that are not explicitly set. |
 | `control_port` | `int` | `9999` | UDP port for control commands (heartbeat/MTI/etc.). |
-| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. When enabled, `OFDMModulator` generates deterministic PRBS payloads instead of listening on `udp_input_*`, and `OFDMDemodulator` switches decoded measurement payloads into BER/BLER/EVM accounting. |
+| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. When enabled, `OFDMModulator` generates deterministic PRBS payloads instead of listening on `udp_input_*`, and `OFDMDemodulator` switches decoded measurement payloads into BER/BLER/EVM accounting. CUDA binaries ignore this mode. |
 | `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
 | `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
 | `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
@@ -587,6 +594,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
 | `sensing_output_mode` | `string` | `dense` | Bistatic sensing UDP output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
+| `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
 | `frame_queue_size` | `int` | `8` | Capacity of the demodulator RX frame queue. Values below `1` are clamped to `1`. |
 | `sync_queue_size` | `int` | `8` | Capacity of the demodulator sync-search batch queue. Values below `1` are clamped to `1`. |
 | `reset_hold_s` | `float` / s | `0.5` | How long invalid delay conditions must persist before the demodulator forces a hard reset back to sync search. Internally this is converted to a frame count from `samples_per_frame / sample_rate`. Values below `0` are clamped to `0.5`. |
@@ -618,7 +626,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `akf_r_max` | `float` | `1e3` | Upper bound of observation-noise variance `R`. |
 | `ppm_adjust_factor` | `float` | `0.05` | Frequency offset compensation factor. |
 | `desired_peak_pos` | `int` | `20` | Target delay-peak position used by alignment logic. |
-| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and UDP output. When set to `false`, the demodulator skips bistatic sensing channel startup. |
+| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and UDP output. When set to `false`, both `OFDMDemodulator` and `CUDAOFDMDemodulator` skip bistatic sensing channel startup. |
 | `bi_sensing_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for bistatic sensing output. |
 | `bi_sensing_port` | `int` | `8889` | Destination port for bistatic sensing output. |
 | `channel_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for channel-estimation output. |
@@ -633,7 +641,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP used when output IP fields are empty. |
 | `control_port` | `int` | `9999` | UDP port for control commands. |
-| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. |
+| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. CUDA binaries ignore this mode. |
 | `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
 | `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
 | `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
@@ -645,8 +653,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 
 Receiver-side note:
 * `data_resource_blocks` should normally match the transmitter exactly, including `kind`.
-* In `compact_mask` mode, bistatic sensing also sends one compact UDP packet per OFDM frame and includes only the RE selected by `sensing_mask_blocks`.
-* `STRD` is ignored in this mode because the mask already defines the sampling pattern.
+* In `compact_mask` mode, bistatic sensing also sends one compact UDP packet per OFDM frame and includes only the RE selected by `sensing_mask_blocks`; `STRD` is ignored in this mode because the mask already defines the sampling pattern.
 * The compact payload format is the same as on the modulator side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
 
 Notes:

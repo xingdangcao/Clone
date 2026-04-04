@@ -1151,8 +1151,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <p>Receiver-side note:</p>
 <ul>
 <li><code>data_resource_blocks</code> should normally match the transmitter exactly, including <code>kind</code>.</li>
-<li>In <code>compact_mask</code> mode, bistatic sensing also sends one compact UDP packet per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>.</li>
-<li><code>STRD</code> is ignored in this mode because the mask already defines the sampling pattern.</li>
+<li>In <code>compact_mask</code> mode, bistatic sensing also sends one compact UDP packet per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>; <code>STRD</code> is ignored in this mode because the mask already defines the sampling pattern.</li>
 <li>The compact payload format is the same as on the modulator side: <code>CompactSensingFrameHeader</code> followed by fixed-order raw <code>complex&lt;float&gt;</code> samples.</li>
 </ul>
 <p>Notes:</p>
