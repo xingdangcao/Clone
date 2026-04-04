@@ -506,7 +506,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `sensing_output_mode` | `string` | `dense` | 感知 UDP 输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
 | `cuda_mod_pipeline_slots` | `int` | `2` | CUDA 调制流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
 | `pilot_positions` | `int[]` | `[571,...,451]` | 导频子载波索引列表。 |
-| `data_resource_blocks` | `object[]` | 缺省 | 可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除同步和导频外的所有 RE 都承载 payload。设为 `[]` 表示完全不发送 payload。每个块是一个矩形，使用 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`，并可选 `kind`。`kind: payload` 表示这些 RE 承载真实业务数据；`kind: sensing_pilot` 表示这些 RE 不承载 payload，而是发送已知同步序列的取值，便于感知侧把这些 RE 当作确定参考。未被 `payload` 块选中的其余非同步、非导频 RE 会发送预生成 QPSK。 |
+| `data_resource_blocks` | `object[]` | 缺省 | 可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除同步和导频外的所有 RE 都承载 payload。设为 `[]` 表示完全不发送 payload。每个块是一个矩形，使用 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`，并可选 `kind`。`kind: payload` 表示这些 RE 承载真实业务数据；`kind: sensing_pilot` 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 `sensing_pilot` 误判成专用同步符号。未被 `payload` 块选中的其余非同步、非导频 RE 会发送预生成 QPSK。 |
 | `sensing_mask_blocks` | `object[]` | 缺省 | 可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 `sensing_output_mode=compact_mask` 时生效；`dense` 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许覆盖同步 / 导频 RE，重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启。 |
 | `device_args` | `string` | `""` | 通用 USRP 参数（TX/RX 兜底）。 |
 | `tx_device_args` | `string` | `""` | TX 专用 USRP 参数。 |
@@ -542,7 +542,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 * `sensing_mask_blocks` 决定“compact 感知时哪些 RE 要导出”。
 * 前者影响 payload 映射，后者只影响感知输出，两者不是互相替代的关系。
 
-若启用 `data_resource_blocks`，请把相同的矩形块和 `kind` 同步写入 `Demodulator.yaml`。如果与 `sync_pos` 或 `pilot_positions` 重叠，内置的同步 / 导频 RE 仍然优先。
+若启用 `data_resource_blocks`，请把相同的矩形块和 `kind` 同步写入 `Demodulator.yaml`。如果与 `sync_pos` 或 `pilot_positions` 重叠，内置的同步 / 导频 RE 仍然优先。优先级始终是“同步符号 > 导频 > sensing_pilot > payload/预生成 QPSK”。
 
 当 `sensing_output_mode=compact_mask` 时，感知会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，其中只包含 `sensing_mask_blocks` 选中的 RE。此时 `STRD` 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启：`SKIP=1` 保持输出紧凑原始 RE，`SKIP=0` 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 `range_fft_size` 和 `doppler_fft_size`，确保它们能覆盖所选子载波数和符号数。紧凑感知 UDP 载荷格式为 `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`，后面跟着固定顺序的 `re_count` 个原始 `complex<float>` 数据。当前 `plot_sensing*.py` 还不能处理非“规则”的 compact 载荷。
 
@@ -601,7 +601,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `range_fft_size` | `int` | `1024` | 距离向 FFT 点数。 |
 | `doppler_fft_size` | `int` | `100` | 多普勒向 FFT 点数。 |
 | `pilot_positions` | `int[]` | `[571,...,451]` | 导频子载波索引列表。 |
-| `data_resource_blocks` | `object[]` | 缺省 | 接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步和导频外的所有 RE 都参与 payload 提取。设为 `[]` 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 `kind`。其中 `kind: payload` 的块会产生 payload LLR，`kind: sensing_pilot` 的块则会被当作已知参考 RE，不参与 payload 提取。 |
+| `data_resource_blocks` | `object[]` | 缺省 | 接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步和导频外的所有 RE 都参与 payload 提取。设为 `[]` 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 `kind`。其中 `kind: payload` 的块会产生 payload LLR，`kind: sensing_pilot` 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。 |
 | `sensing_mask_blocks` | `object[]` | 缺省 | 接收侧的紧凑感知资源映射，用来回答“在 `compact_mask` 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许覆盖同步 / 导频 RE，重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 `MTI` 和本地 Delay-Doppler 处理。 |
 | `device_args` | `string` | `""` | USRP 参数。 |
 | `clock_source` | `string` | `internal/external/gpsdo` | 时钟源。 |
@@ -653,6 +653,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 
 说明：
 * `data_resource_blocks` 通常应与发射端完全一致，包括 `kind`。
+* 如果资源块与 `sync_pos` 或 `pilot_positions` 重叠，内置的同步 / 导频 RE 仍然优先。优先级是“同步符号 > 导频 > sensing_pilot > payload/预生成 QPSK”。
 * 当 `sensing_output_mode=compact_mask` 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 `sensing_mask_blocks` 选中的 RE；此时 `STRD` 会被忽略，因为 mask 已经定义了采样图样。
 * 紧凑载荷格式与发射端一致：`CompactSensingFrameHeader` 后面跟固定顺序的原始 `complex<float>` 数据。
 * RX AGC 分为两个阶段。`SYNC_SEARCH` 阶段会先把增益恢复到配置的 `rx_gain`，然后进行粗搜索扫描（每 10 个帧增加 `1 dB`，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 `rx_agc_low_threshold_db` / `rx_agc_high_threshold_db` 定义的窗口来细调增益。

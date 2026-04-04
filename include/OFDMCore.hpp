@@ -84,6 +84,50 @@ inline AlignedVector generate_zc_freq(size_t fft_size, int zc_root) {
     return zc_freq;
 }
 
+inline int normalize_zc_root(int zc_root, size_t fft_size) {
+    if (fft_size == 0) {
+        return zc_root;
+    }
+    const int n = static_cast<int>(fft_size);
+    int normalized = zc_root % n;
+    if (normalized < 0) {
+        normalized += n;
+    }
+    return normalized;
+}
+
+inline int select_known_sensing_pilot_zc_root(size_t fft_size, int sync_zc_root) {
+    if (fft_size <= 1) {
+        return sync_zc_root + 1;
+    }
+
+    const int n = static_cast<int>(fft_size);
+    const int normalized_sync_root = normalize_zc_root(sync_zc_root, fft_size);
+    for (int step = 1; step < n; ++step) {
+        const int candidate = (normalized_sync_root + step) % n;
+        if (candidate == 0 || candidate == normalized_sync_root) {
+            continue;
+        }
+        if (std::gcd(candidate, n) == 1) {
+            return candidate;
+        }
+    }
+
+    for (int candidate = 1; candidate < n; ++candidate) {
+        if (candidate != normalized_sync_root) {
+            return candidate;
+        }
+    }
+
+    return sync_zc_root + 1;
+}
+
+inline AlignedVector generate_sensing_pilot_freq(size_t fft_size, int sync_zc_root) {
+    return generate_zc_freq(
+        fft_size,
+        select_known_sensing_pilot_zc_root(fft_size, sync_zc_root));
+}
+
 
 /**
  * @brief Manager for FFTW Wisdom.

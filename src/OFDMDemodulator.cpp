@@ -102,6 +102,8 @@ public:
           _measurement_enabled(measurement_mode_enabled(cfg)),
           _data_resource_layout(build_data_resource_grid_layout(cfg)),
           zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
+          _sensing_pilot_zc_root(select_known_sensing_pilot_zc_root(cfg.fft_size, cfg.zc_root)),
+          sensing_pilot_freq_(generate_sensing_pilot_freq(cfg.fft_size, cfg.zc_root)),
           _sync_scratch_buffer(cfg.sync_samples()),
           frame_queue_(cfg.frame_queue_size),
           sync_queue_(cfg.sync_queue_size, [&cfg]() {
@@ -160,6 +162,11 @@ public:
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
                      << " non-sync/non-pilot RE per frame"
                      << (cfg_.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
+        if (_data_resource_layout.sensing_pilot_re_count > 0) {
+            LOG_G_INFO() << "Sensing-pilot sequence uses alternate ZC root "
+                         << _sensing_pilot_zc_root
+                         << " (sync root=" << cfg_.zc_root << ").";
+        }
 
         init_usrp();
         init_filter();
@@ -265,6 +272,8 @@ private:
     uhd::rx_streamer::sptr rx_stream_;
     
     AlignedVector zc_freq_;
+    int _sensing_pilot_zc_root = 0;
+    AlignedVector sensing_pilot_freq_;
     AlignedVector tx_sync_symbol_; 
     AlignedVector _sync_scratch_buffer;
     std::atomic<int> sync_offset_{0};
@@ -1474,6 +1483,7 @@ private:
         
         if (sensing_enabled) {
             for (size_t i = 0; i < cfg_.num_symbols; ++i) {
+                // The sync symbol always remodulates to the dedicated sync sequence.
                 if (i == cfg_.sync_pos) {
                     // Sync symbol uses original ZC sequence.
                     sense_frame.tx_symbols[i] = zc_freq_;
@@ -1493,7 +1503,7 @@ private:
                             continue;
                         }
                         const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
-                        sense_frame.tx_symbols[i][k] = zc_freq_[k];
+                        sense_frame.tx_symbols[i][k] = sensing_pilot_freq_[k];
                     }
                 }
             }

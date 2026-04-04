@@ -200,6 +200,11 @@ public:
                      << " non-sync/non-pilot RE per frame, "
                      << _data_resource_layout.sensing_pilot_re_count << " sensing-pilot RE"
                      << (_cfg.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
+        if (_data_resource_layout.sensing_pilot_re_count > 0) {
+            LOG_G_INFO() << "Sensing-pilot sequence uses alternate ZC root "
+                         << _sensing_pilot_zc_root
+                         << " (sync root=" << _cfg.zc_root << ").";
+        }
         if (!_measurement_enabled && _data_resource_layout.payload_re_count == 0) {
             LOG_G_WARN() << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
         }
@@ -310,7 +315,9 @@ private:
     fftwf_plan _ifft_plan = nullptr;     // IFFT plan
     
     // Zadoff-Chu sequence
-    AlignedVector _zc_seq;               
+    AlignedVector _zc_seq;
+    AlignedVector _sensing_pilot_seq;
+    int _sensing_pilot_zc_root = 0;
     const AlignedVector _blank_frame;
     const DataResourceGridLayout _data_resource_layout;
     SymbolVector _symbol_templates;
@@ -814,6 +821,9 @@ private:
     // Prepare ZC sequence using ZadoffChuGenerator
     void _prepare_zc_sequence() {
         _zc_seq = generate_zc_freq(_cfg.fft_size, _cfg.zc_root);
+        _sensing_pilot_zc_root =
+            select_known_sensing_pilot_zc_root(_cfg.fft_size, _cfg.zc_root);
+        _sensing_pilot_seq = generate_zc_freq(_cfg.fft_size, _sensing_pilot_zc_root);
     }
 
     static std::complex<float> _qpsk_symbol_from_int(int sym) {
@@ -837,6 +847,7 @@ private:
         size_t pregen_offset = 0;
         for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
             auto& template_symbol = _symbol_templates[sym];
+            // The sync symbol always keeps the dedicated sync ZC sequence.
             if (sym == _cfg.sync_pos) {
                 std::memcpy(template_symbol.data(), _zc_seq.data(),
                             _cfg.fft_size * sizeof(std::complex<float>));
@@ -848,13 +859,15 @@ private:
                 const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
                 const size_t flat_idx = non_pilot_base + di;
                 template_symbol[k] = _data_resource_layout.sensing_pilot_mask[flat_idx] != 0
-                    ? _zc_seq[k]
+                    ? _sensing_pilot_seq[k]
                     : _pregen_symbols[pregen_offset + di];
                 const int payload_rank = _data_resource_layout.payload_rank[non_pilot_base + di];
                 if (payload_rank >= 0) {
                     _payload_subcarrier_indices_flat.push_back(static_cast<int>(k));
                 }
             }
+            // Pilots are written after sensing-pilot RE so pilots keep highest priority
+            // within non-sync symbols.
             for (size_t idx = 0; idx < _cfg.pilot_positions.size(); ++idx) {
                 const size_t k = _cfg.pilot_positions[idx];
                 if (k < _cfg.fft_size) {

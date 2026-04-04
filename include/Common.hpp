@@ -96,7 +96,7 @@ using SymbolVector = std::vector<AlignedVector>;
  * @brief Zero-copy view over frequency-domain TX symbols for sensing.
  *
  * Supports two storage backends:
- *   1. Flat contiguous buffer:
+ *   1. Flat contiguous buffer (CUDA pinned memory path):
  *      Symbols are stored as [num_symbols × fft_size] complex<float> in a
  *      single contiguous allocation.  operator[] extracts a copy of the
  *      requested symbol on demand — only the ~5 symbols per frame actually
@@ -111,7 +111,7 @@ class TxSymbolView {
 public:
     TxSymbolView() = default;
 
-    /** Construct from flat contiguous buffer. */
+    /** Construct from flat contiguous buffer (CUDA pinned memory path). */
     TxSymbolView(std::shared_ptr<const void> owner,
                  const std::complex<float>* flat_data,
                  size_t num_symbols, size_t fft_size)
@@ -621,6 +621,8 @@ struct Config {
     size_t cp_length = 128;            // Cyclic prefix length
     size_t num_symbols = 100;          // Number of symbols per frame
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
+    size_t cuda_mod_pipeline_slots = 2;   // Number of CUDA mod pipeline slots
+    size_t cuda_demod_pipeline_slots = 3; // Number of CUDA demod pipeline slots
     size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
     size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
     size_t sync_pos = 1;               // Synchronization symbol position
@@ -1158,6 +1160,8 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             }
 
             for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
+                // sync_pos always keeps the dedicated sync symbol content, so resource blocks
+                // never claim RE from that symbol.
                 if (sym == cfg.sync_pos) {
                     if (block.kind == DataResourceBlockKind::Payload) {
                         stripped_sync_re += block.subcarrier_count;
@@ -1172,6 +1176,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
                 for (size_t sc = block.subcarrier_start;
                      sc < block.subcarrier_start + block.subcarrier_count;
                      ++sc) {
+                    // Pilot RE always keep the known pilot sequence, regardless of block kind.
                     if (layout.pilot_mask[sc] != 0) {
                         ++stripped_pilot_re;
                         continue;
@@ -1592,6 +1597,7 @@ inline Config make_default_modulator_config() {
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     cfg.num_symbols = 100;
     cfg.sensing_output_mode = kSensingOutputModeDense;
+    cfg.cuda_mod_pipeline_slots = 2;
     cfg.mono_sensing_output_enabled = true;
     cfg.mono_sensing_ip = "";
     cfg.mono_sensing_port = 8888;
@@ -1631,6 +1637,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
     out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
+    out << YAML::Key << "cuda_mod_pipeline_slots" << YAML::Value << cfg.cuda_mod_pipeline_slots;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
     out << YAML::Key << "rx_device_args" << YAML::Value << cfg.rx_device_args;
@@ -1725,6 +1732,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["sensing_output_mode"]) {
             cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
         }
+        if (config["cuda_mod_pipeline_slots"]) {
+            cfg.cuda_mod_pipeline_slots = config["cuda_mod_pipeline_slots"].as<size_t>();
+        }
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["tx_device_args"]) cfg.tx_device_args = config["tx_device_args"].as<std::string>();
         if (config["rx_device_args"]) cfg.rx_device_args = config["rx_device_args"].as<std::string>();
@@ -1812,6 +1822,10 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         cfg.default_ip = "127.0.0.1";
     }
     normalize_sensing_fft_sizes(cfg, "modulator sensing");
+    if (cfg.cuda_mod_pipeline_slots == 0) {
+        LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
+        cfg.cuda_mod_pipeline_slots = 1;
+    }
     if (cfg.tx_circular_buffer_size == 0) {
         LOG_G_WARN() << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
         cfg.tx_circular_buffer_size = 1;
@@ -1909,6 +1923,7 @@ inline Config make_default_demodulator_config() {
     cfg.doppler_fft_size = 100;
     cfg.num_symbols = 100;
     cfg.sensing_symbol_num = 100;
+    cfg.cuda_demod_pipeline_slots = 3;
     cfg.frame_queue_size = 8;
     cfg.sync_queue_size = 8;
     cfg.sync_pos = 1;
@@ -1984,6 +1999,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
     out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
+    out << YAML::Key << "cuda_demod_pipeline_slots" << YAML::Value << cfg.cuda_demod_pipeline_slots;
     out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
     out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
     out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
@@ -2095,6 +2111,9 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["sensing_output_mode"]) {
             cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
         }
+        if (config["cuda_demod_pipeline_slots"]) {
+            cfg.cuda_demod_pipeline_slots = config["cuda_demod_pipeline_slots"].as<size_t>();
+        }
         if (config["frame_queue_size"]) cfg.frame_queue_size = config["frame_queue_size"].as<size_t>();
         if (config["sync_queue_size"]) cfg.sync_queue_size = config["sync_queue_size"].as<size_t>();
         if (config["reset_hold_s"]) cfg.reset_hold_s = config["reset_hold_s"].as<double>();
@@ -2180,6 +2199,10 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
 
 inline void finalize_demodulator_network_defaults(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "demodulator sensing");
+    if (cfg.cuda_demod_pipeline_slots == 0) {
+        LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
+        cfg.cuda_demod_pipeline_slots = 1;
+    }
     if (cfg.frame_queue_size == 0) {
         LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.frame_queue_size = 1;
