@@ -3,6 +3,8 @@ capture/*.mat
 capture/plot_results
 *.log
 _*
+!docs/_astro/
+!docs/_astro/**
 /.claude
 
 measurement/
