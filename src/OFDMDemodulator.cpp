@@ -324,7 +324,6 @@ private:
     std::unique_ptr<SensingChannel> _bistatic_sensing_channel;
     std::atomic<uint64_t> _next_bistatic_frame_start_symbol{0};
 
-    bool _saved = false; // Whether data has been saved
     double _freq_offset_sum = 0.0f; // Average frequency offset
     size_t _freq_offset_count = 0; // Sensing symbol count
     double _avg_freq_offset = 0.0;
@@ -1144,16 +1143,6 @@ private:
         }
     }
 
-    void save_data(const AlignedVector& data, const std::string& filename) {
-        if (!_saved) {
-            std::ofstream data_file(filename, std::ios::binary);
-            data_file.write(reinterpret_cast<const char*>(data.data()),
-                data.size() * sizeof(std::complex<float>));
-            data_file.close();
-            _saved = true;
-        }
-    }
-
     void process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1, true);
@@ -1312,7 +1301,6 @@ private:
         }
         AlignedVector sync_symbol_freq;
         size_t pos = 0;
-        //save_data(frame, "rx_frame.bin");
         prof_step_start = ProfileClock::now();
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             AlignedVector symbol(cfg_.fft_size);

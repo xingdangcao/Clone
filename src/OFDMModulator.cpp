@@ -143,7 +143,6 @@ public:
         _fft_out(cfg.fft_size),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         _data_resource_layout(build_data_resource_grid_layout(cfg)),
-        tx_data_file("tx_frame.bin", std::ios::binary),
         _control_handler(cfg.control_port),
         _measurement_enabled(measurement_mode_enabled(cfg)),
         _frame_pool(32, [&cfg]() {
@@ -338,9 +337,7 @@ private:
     
     uhd::time_spec_t _start_time{0.0}; 
 
-    // Pre-generated data and file
-    std::ofstream tx_data_file;
-    std::atomic<bool> data_saved{false};
+    // Pre-generated data
     AlignedVector _pregen_symbols;
     // Data ingest/encoding related
     std::thread _data_thread;
