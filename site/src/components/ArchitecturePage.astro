@@ -1,0 +1,33 @@
+---
+import { architectureContent, navItems } from "../data/site.js";
+import DocsLayout from "../layouts/DocsLayout.astro";
+import SectionBlock from "./SectionBlock.astro";
+
+const { locale } = Astro.props;
+const content = architectureContent[locale];
+const layoutLang = locale === "zh" ? "zh-CN" : "en";
+const languageSwitch = locale === "zh"
+  ? { href: "architecture.html", label: "EN" }
+  : { href: "architecture_zh.html", label: "中文" };
+---
+
+<DocsLayout
+  title={content.title}
+  description={content.description}
+  lang={layoutLang}
+  pageKey="architecture"
+  navItems={navItems[locale]}
+  langSwitch={languageSwitch}
+>
+  <div class="container page-stack">
+    {content.sections.map((section) => (
+      <SectionBlock
+        id={section.id}
+        title={section.title}
+        className="section-prose"
+      >
+        <div class="rich-article" set:html={section.html}></div>
+      </SectionBlock>
+    ))}
+  </div>
+</DocsLayout>

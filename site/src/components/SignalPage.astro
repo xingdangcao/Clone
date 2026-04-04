@@ -1,0 +1,34 @@
+---
+import { navItems, signalContent } from "../data/site.js";
+import DocsLayout from "../layouts/DocsLayout.astro";
+import SectionBlock from "./SectionBlock.astro";
+
+const { locale } = Astro.props;
+const content = signalContent[locale];
+const layoutLang = locale === "zh" ? "zh-CN" : "en";
+const languageSwitch = locale === "zh"
+  ? { href: "signal_processing.html", label: "EN" }
+  : { href: "signal_processing_zh.html", label: "中文" };
+---
+
+<DocsLayout
+  title={content.title}
+  description={content.description}
+  lang={layoutLang}
+  pageKey="signal"
+  navItems={navItems[locale]}
+  langSwitch={languageSwitch}
+  math={true}
+>
+  <div class="container page-stack">
+    {content.sections.map((section) => (
+      <SectionBlock
+        id={section.id}
+        title={section.title}
+        className="section-prose"
+      >
+        <div class="rich-article" set:html={section.html}></div>
+      </SectionBlock>
+    ))}
+  </div>
+</DocsLayout>

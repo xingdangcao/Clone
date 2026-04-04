@@ -1,176 +1,29 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenISAC - 实时 OFDM 通信感知一体化平台</title>
-    <link rel="icon" type="image/svg+xml" href="images/icon.svg">
-    <link rel="stylesheet" href="style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-</head>
-
-<body>
-
-    <header>
-        <nav>
-            <a href="index_zh.html" class="logo"><img src="images/logo.svg" alt="OpenISAC"></a>
-            <ul class="nav-links">
-                <li><a href="index_zh.html" class="active">首页</a></li>
-                <li><a href="architecture_zh.html">架构</a></li>
-                <li><a href="signal_processing_zh.html">信号处理</a></li>
-                <li><a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank">GitHub</a></li>
-                <li><a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank">QQ群</a></li>
-                <li><a href="index.html">En</a></li>
-            </ul>
-        </nav>
-    </header>
-
-    <div class="hero">
-        <img src="images/logo_main.svg" alt="OpenISAC" class="hero-logo">
-        <p>一个用于通信感知一体化（ISAC）研究的开源通用高性能实时实验平台</p>
-        <a href="#hardware" class="cta-button">开始使用</a>
-    </div>
-
-    <main>
-        <section id="about">
-            <h2>关于 OpenISAC</h2>
-            <p>
-                通信感知一体化 (ISAC) 被认为是 6G 的关键技术之一。OpenISAC 是一个通用且高性能的开源平台，旨在弥合理论与实践之间的差距。
-            </p>
-            <p>
-                它完全基于开源软件 (UHD、C++、Python) 构建，支持基于 OFDM 的实时通信和感知。其核心特性是新颖的空口 (Over-the-Air) 感知同步机制，无需有线连接即可实现稳定的双站感知。
-            </p>
-            <p>
-                如果您觉得这个仓库有用，请引用我们的论文：
-            </p>
-            <p>
-                Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for
-                OFDM-ISAC with Over-the-Air Synchronization," <i>arXiv preprint</i> arXiv:2601.03535, Jan.
-                2026.
-            </p>
-            <p>
-                [<a href="https://arxiv.org/pdf/2601.03535" target="_blank">arXiv</a>]
-            </p>
-        </section>
-
-        <section id="affiliation">
-            <h2>所属机构</h2>
-            <div style="display: flex; align-items: center; gap: 20px; margin: 20px 0;">
-                <img src="images/SEUlogo.png" alt="SEU Logo"
-                    style="height: 80px; width: auto; border: none; box-shadow: none; margin: 0;">
-                <img src="images/PML.png" alt="PML Logo"
-                    style="height: 80px; width: auto; border: none; box-shadow: none; margin: 0;">
-            </div>
-            <p>
-                <b>东南大学移动通信国家重点实验室 & 紫金山实验室 曾勇课题组</b>
-            </p>
-        </section>
-
-        <section id="community">
-            <h2>社区</h2>
-            <ul>
-                <li><a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank">加入我们的 QQ 群</a></li>
-                <li><a href="https://space.bilibili.com/627920129" target="_blank">Bilibili 频道 (曾勇课题组)</a></li>
-            </ul>
-            <p>微信公众号:</p>
-            <p>
-                <img src="images/WeChat.jpg" alt="WeChat QR Code" width="200">
-            </p>
-        </section>
-
-        <section id="scope">
-            <h2>它是什么，又不是什么？</h2>
-
-            <h3>OpenISAC 是什么？</h3>
-            <p>
-                OpenISAC 是一个基于 OFDM 的通信与感知一体化（ISAC）系统，专为学术实验和快速算法验证而设计。
-            </p>
-            <p>
-                其目标是提供一个简洁且易于修改的 OFDM 平台，使研究人员能够快速迭代通信与感知算法，而无需处理复杂的标准协议栈（如 WIFI、LTE、NR 等）。
-            </p>
-            <p>
-                由于专注于简洁性，OpenISAC 通常需要更少的计算资源，因此相较于更复杂、功能更全面的系统，能够实现更高的采样率。
-            </p>
-
-            <h3>OpenISAC 不是什么？</h3>
-            <p>
-                OpenISAC 不旨在成为兼容标准的实现（它不符合 Wi-Fi 或 5G NR 等标准）。
-            </p>
-            <p>
-                它也不旨在替代或竞争全栈开源标准实现，如 openwifi 或 OpenAirInterface。如果您的目标是互操作性、标准合规性或生产级协议栈，那么上述项目是正确的方向。
-            </p>
-
-            <h3>何时使用它</h3>
-            <ul>
-                <li>原型设计以及测试新的通信、感知算法</li>
-                <li>使用极简 PHY 快速实现新想法</li>
-                <li>不需要互操作性的研究</li>
-            </ul>
-
-            <h3>何时不使用它</h3>
-            <ul>
-                <li>构建兼容 Wi-Fi/NR 的系统</li>
-                <li>需要标准通信系统的研究（完整的 MAC/协议栈、互操作性等）</li>
-            </ul>
-        </section>
-
-        <section id="sensing-demo">
-            <h2>感知演示</h2>
-            <div class="demo-grid">
-                <div class="demo-card">
-                    <div class="video-wrapper">
-                        <video controls muted loop playsinline>
-                            <source src="https://vids.zzw123app.top/videos/Drone_Moving.mp4" type="video/mp4">
-                            您的浏览器不支持 video 标签。
-                        </video>
-                    </div>
-                    <h3>时延-多普勒感知</h3>
-                    <p>运动无人机的实时时延-多普勒图。</p>
-                </div>
-                <div class="demo-card">
-                    <div class="video-wrapper">
-                        <video controls muted loop playsinline>
-                            <source src="https://vids.zzw123app.top/videos/MTI_on_vs_off.mp4" type="video/mp4">
-                            您的浏览器不支持 video 标签。
-                        </video>
-                    </div>
-                    <h3>杂波抑制</h3>
-                    <p>MTI 杂波抑制滤波器开启与关闭对比。</p>
-                </div>
-                <div class="demo-card">
-                    <div class="video-wrapper">
-                        <video controls muted loop playsinline>
-                            <source src="https://vids.zzw123app.top/videos/MicroDoppler_Up_Down.mp4" type="video/mp4">
-                            您的浏览器不支持 video 标签。
-                        </video>
-                    </div>
-                    <h3>微多普勒感知</h3>
-                    <p>无人机上升和下降的微多普勒特征。</p>
-                </div>
-            </div>
-        </section>
-
-        <section id="comm-demo">
-            <h2>通信演示</h2>
-            <div class="demo-grid">
-                <div class="demo-card">
-                    <div class="video-wrapper">
-                        <video controls muted loop playsinline>
-                            <source src="https://vids.zzw123app.top/videos/Communication.mp4" type="video/mp4">
-                            您的浏览器不支持 video 标签。
-                        </video>
-                    </div>
-                    <h3>视频流传输</h3>
-                    <p>通过 ISAC 链路进行基于 ffmpeg 的实时视频流传输。</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- README_SYNC_START -->
-<section id="hardware">
-<!-- AUTO-GENERATED FROM README: DO NOT EDIT THIS SECTION DIRECTLY -->
-<h2>硬件准备</h2>
+<!DOCTYPE html><html lang="zh-CN"> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>OpenISAC - 实时 OFDM 通信感知一体化平台</title><meta name="description" content="OpenISAC 项目文档站点。"><meta name="theme-color" content="#0f6b6a"><link rel="icon" type="image/svg+xml" href="images/icon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="/_astro/SectionBlock.DSiaPWvP.css"></head> <body class="site-body page-home lang-zh"> <div class="site-chroma" aria-hidden="true"></div> <header class="site-header"> <div class="container header-shell"> <div class="header-inner"> <a href="index_zh.html" class="brand"> <img src="images/logo.svg" alt="OpenISAC" width="164" height="54"> </a> <nav class="site-nav" aria-label="主导航"> <a href="index_zh.html" class="nav-link active"> 首页 </a><a href="architecture_zh.html" class="nav-link"> 架构 </a><a href="signal_processing_zh.html" class="nav-link"> 信号处理 </a><a href="https://github.com/zhouzhiwen2000/OpenISAC" class="nav-link" target="_blank" rel="noreferrer noopener"> GitHub </a><a href="https://qm.qq.com/q/NIQRNGb0kY" class="nav-link" target="_blank" rel="noreferrer noopener"> QQ群 </a> </nav> <div class="header-actions"> <a class="lang-switch" href="index.html"> EN </a> </div> </div> </div> </header> <main class="page-frame">  <div class="container page-stack"> <section class="home-hero animate"> <img src="images/logo_main.svg" alt="OpenISAC" class="home-hero-logo"> <p>一个用于通信感知一体化（ISAC）研究的开源通用高性能实时实验平台</p> <a href="#hardware" class="hero-action">开始使用</a> </section> <section id="about" class="section-block animate section-prose"> <div class="section-header">  <h2 class="section-title">关于 OpenISAC</h2>  </div> <div class="section-body">  <div class="generated-prose"><p>通信感知一体化 (ISAC) 被认为是 6G 的关键技术之一。OpenISAC 是一个通用且高性能的开源平台，旨在弥合理论与实践之间的差距。</p>
+<p>它完全基于开源软件 (UHD、C++、Python) 构建，支持基于 OFDM 的实时通信和感知。其核心特性是新颖的空口 (Over-the-Air) 感知同步机制，无需有线连接即可实现稳定的双站感知。</p>
+<p>如果您觉得这个仓库有用，请引用我们的论文：</p>
+<p>Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," <i>arXiv preprint</i> arXiv:2601.03535, Jan. 2026.</p>
+<p>[<a href="https://arxiv.org/pdf/2601.03535" target="_blank" rel="noreferrer noopener">arXiv</a>]</p></div>  </div> </section> <section id="affiliation" class="section-block animate section-community"> <div class="section-header">  <h2 class="section-title">所属机构</h2>  </div> <div class="section-body">  <div class="generated-prose"><div class="logo-row logo-row-center">
+  <img src="images/SEUlogo.png" alt="SEU Logo">
+  <img src="images/PML.png" alt="PML Logo">
+</div>
+<p class="affiliation-copy"><b>东南大学移动通信国家重点实验室 & 紫金山实验室 曾勇课题组</b></p></div>  </div> </section> <section id="community" class="section-block animate section-community"> <div class="section-header">  <h2 class="section-title">社区</h2>  </div> <div class="section-body">  <div class="community-card"> <ul class="link-list"> <li> <a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank" rel="noreferrer noopener"> 加入我们的 QQ 群 </a> </li><li> <a href="https://space.bilibili.com/627920129" target="_blank" rel="noreferrer noopener"> Bilibili 频道 (曾勇课题组) </a> </li> </ul> <div class="wechat-block"> <p>微信公众号:</p> <img src="images/WeChat.jpg" alt="WeChat QR Code"> </div> </div>  </div> </section> <section id="scope" class="section-block animate section-prose"> <div class="section-header">  <h2 class="section-title">它是什么，又不是什么？</h2>  </div> <div class="section-body">  <div class="generated-prose"><h3>OpenISAC 是什么？</h3>
+<p>OpenISAC 是一个基于 OFDM 的通信与感知一体化（ISAC）系统，专为学术实验和快速算法验证而设计。</p>
+<p>其目标是提供一个简洁且易于修改的 OFDM 平台，使研究人员能够快速迭代通信与感知算法，而无需处理复杂的标准协议栈（如 WIFI、LTE、NR 等）。</p>
+<p>由于专注于简洁性，OpenISAC 通常需要更少的计算资源，因此相较于更复杂、功能更全面的系统，能够实现更高的采样率。</p>
+<h3>OpenISAC 不是什么？</h3>
+<p>OpenISAC 不旨在成为兼容标准的实现（它不符合 Wi-Fi 或 5G NR 等标准）。</p>
+<p>它也不旨在替代或竞争全栈开源标准实现，如 openwifi 或 OpenAirInterface。如果您的目标是互操作性、标准合规性或生产级协议栈，那么上述项目是正确的方向。</p>
+<h3>何时使用它</h3>
+<ul>
+  <li>原型设计以及测试新的通信、感知算法</li>
+  <li>使用极简 PHY 快速实现新想法</li>
+  <li>不需要互操作性的研究</li>
+</ul>
+<h3>何时不使用它</h3>
+<ul>
+  <li>构建兼容 Wi-Fi/NR 的系统</li>
+  <li>需要标准通信系统的研究（完整的 MAC/协议栈、互操作性等）</li>
+</ul></div>  </div> </section> <section id="sensing-demo" class="section-block animate section-demo"> <div class="section-header">  <h2 class="section-title">感知演示</h2>  </div> <div class="section-body">  <div class="showcase-grid"> <article class="media-card"> <div class="video-frame"> <video controls muted loop playsinline preload="metadata"> <source src="https://vids.zzw123app.top/videos/Drone_Moving.mp4" type="video/mp4"> 您的浏览器不支持 video 标签。 </video> </div> <h3>时延-多普勒感知</h3> <p>运动无人机的实时时延-多普勒图。</p> </article><article class="media-card"> <div class="video-frame"> <video controls muted loop playsinline preload="metadata"> <source src="https://vids.zzw123app.top/videos/MTI_on_vs_off.mp4" type="video/mp4"> 您的浏览器不支持 video 标签。 </video> </div> <h3>杂波抑制</h3> <p>MTI 杂波抑制滤波器开启与关闭对比。</p> </article><article class="media-card"> <div class="video-frame"> <video controls muted loop playsinline preload="metadata"> <source src="https://vids.zzw123app.top/videos/MicroDoppler_Up_Down.mp4" type="video/mp4"> 您的浏览器不支持 video 标签。 </video> </div> <h3>微多普勒感知</h3> <p>无人机上升和下降的微多普勒特征。</p> </article> </div>  </div> </section> <section id="comm-demo" class="section-block animate section-demo"> <div class="section-header">  <h2 class="section-title">通信演示</h2>  </div> <div class="section-body">  <div class="showcase-grid showcase-grid-single"> <article class="media-card"> <div class="video-frame"> <video controls muted loop playsinline preload="metadata"> <source src="https://vids.zzw123app.top/videos/Communication.mp4" type="video/mp4"> 您的浏览器不支持 video 标签。 </video> </div> <h3>视频流传输</h3> <p>通过 ISAC 链路进行基于 ffmpeg 的实时视频流传输。</p> </article> </div>  </div> </section> <section id="hardware" class="section-block animate section-guide"> <div class="section-body"> <div class="generated-prose"><h2>硬件准备</h2>
 <h3>后端 (C++)</h3>
 <p>要设置完整的系统，您需要以下硬件：</p>
 <ul>
@@ -360,7 +213,12 @@ conda activate OpenISAC
 <li><strong>Windows:</strong> 从 <a href="https://ffmpeg.org/download.html">ffmpeg.org</a> 下载并添加到 PATH，或将可执行文件放置在工作目录中。</li>
 </ul>
 <h4>启用 GPU 加速 (可选)</h4>
-<p>部分快速绘图脚本可以在当前 Python 环境提供可选 GPU 数组后端时启用加速；如果未安装相关后端，则会自动回退到 CPU 执行。</p>
+<p>如果有 Nvidia GPU，请安装 <code>cupy-cuda12x</code> 以启用 GPU 加速：</p>
+<blockquote>
+<p><strong>注意:</strong> 安装 CuPy 之前，请务必先安装 CUDA Toolkit。</p>
+</blockquote>
+<pre><code class="language-bash">pip install cupy-cuda12x
+</code></pre>
 <h4>启用 Intel 集成显卡加速 (可选)</h4>
 <p>如果您的设备配备 Intel 集成显卡（如 Intel UHD Graphics、Intel Iris Xe 等），可以通过 <code>dpctl</code> 和 <code>dpnp</code> 启用 GPU 加速。这对于没有 Nvidia 独立显卡的笔记本电脑和台式机特别有用。</p>
 <h5>1. 安装 Intel 显卡官方驱动</h5>
@@ -382,10 +240,10 @@ conda activate OpenISAC
 <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]
 </code></pre>
 <h5>4. 使用说明</h5>
-<p>OpenISAC 前端会自动检测可用的数组后端。优先级顺序为：</p>
+<p>OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：</p>
 <ol>
-<li>CuPy 后端</li>
-<li>dpnp 后端</li>
+<li>Nvidia GPU (CUDA)</li>
+<li>Intel iGPU (dpnp)</li>
 <li>CPU (回退选项)</li>
 </ol>
 <p>无需修改代码，系统会自动选择最佳可用后端。</p>
@@ -451,13 +309,13 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <li>为 <code>cpu_cores</code> 提供专门的 CPU 绑定编辑器，可按线程名填写 CPU，并自动生成对应注释。</li>
 <li>保存当前表单后，可在 <code>build/</code> 目录中启动/停止调制与解调进程。</li>
 <li>提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。</li>
-<li>每个 tab 都提供命令预设，也支持自定义启动命令。</li>
+<li>每个 tab 都提供 CPU/CUDA 预设命令，也支持自定义启动命令。</li>
 <li>可以在较大的时频资源网格画布上直接绘制 <code>data_resource_blocks</code> 的 payload / sensing-pilot 矩形块，或绘制 <code>sensing_mask_blocks</code> 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。</li>
 <li>内置 <code>Guard Band Grid</code> 预设，规则与 <code>scripts/plot_const.py</code> 一致：默认仅保留 <code>1..489</code> 和 <code>535..N-1</code> 这两段子载波，然后再继续套用 sync / pilot 的剔除规则。</li>
 </ul>
 <p>说明：</p>
 <ul>
-<li>默认命令分别是 <code>./OFDMModulator</code> 和 <code>./OFDMDemodulator</code>。</li>
+<li>默认命令分别是 <code>./OFDMModulator</code> 和 <code>./OFDMDemodulator</code>；如果需要 CUDA 版本，可在下拉框里切换。</li>
 <li>编辑器当前直接面向 <code>build/</code> 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 <code>Modulator.yaml</code> / <code>Demodulator.yaml</code>。</li>
 <li><code>Resource Planner</code> 用来编辑 <code>data_resource_blocks</code>：它决定哪些 RE 承载 payload，哪些 RE 作为 <code>sensing_pilot</code> 保留给感知参考。</li>
 <li><code>Sensing Resource Map</code> 用来编辑 <code>sensing_mask_blocks</code>：它决定 <code>sensing_output_mode=compact_mask</code> 时哪些 RE 会被送到感知输出。</li>
@@ -548,6 +406,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>dense</code></td>
 <td style="text-align:left">感知 UDP 输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda_mod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>2</code></td>
+<td style="text-align:left">CUDA 调制流水线 slot 数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>pilot_positions</code></td>
@@ -685,7 +549,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>measurement_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用 CPU 版内部测量模式。启用后，<code>OFDMModulator</code> 不再监听 <code>udp_input_*</code>，而是内部生成确定性的 PRBS 载荷；<code>OFDMDemodulator</code> 会把测量载荷转入 BER/BLER/EVM 统计。</td>
+<td style="text-align:left">启用 CPU 版内部测量模式。启用后，<code>OFDMModulator</code> 不再监听 <code>udp_input_*</code>，而是内部生成确定性的 PRBS 载荷；<code>OFDMDemodulator</code> 会把测量载荷转入 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>measurement_mode</code></td>
@@ -948,6 +812,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">双站感知 UDP 输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA 解调流水线 slot 数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>frame_queue_size</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8</code></td>
@@ -1137,7 +1007,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>enable_bi_sensing</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用双站感知处理链和 UDP 输出；设为 <code>false</code> 时解调器不会启动双站感知通道。</td>
+<td style="text-align:left">启用双站感知处理链和 UDP 输出；设为 <code>false</code> 时 <code>OFDMDemodulator</code> 与 <code>CUDAOFDMDemodulator</code> 均不会启动双站感知通道。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_ip</code></td>
@@ -1227,7 +1097,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>measurement_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 <code>udp_output_*</code>，而是直接用于 BER/BLER/EVM 统计。</td>
+<td style="text-align:left">启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 <code>udp_output_*</code>，而是直接用于 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>measurement_mode</code></td>
@@ -1284,22 +1154,8 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <li><code>data_resource_blocks</code> 通常应与发射端完全一致，包括 <code>kind</code>。</li>
 <li>当 <code>sensing_output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 <code>sensing_mask_blocks</code> 选中的 RE。</li>
 <li>此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
-<li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。 |</li>
+<li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
 <li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
 <li>解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>
 <li>硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 <code>SYNC_SEARCH</code>。<code>reset_hold_s</code> 决定坏的 delay 条件需要持续多久才会触发这一动作。</li>
-</ul>
-</section>
-<!-- README_SYNC_END -->
-
-    </main>
-
-    <footer>
-        <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p>
-        <p><strong>作者:</strong> 周智文 (zhiwen_zhou@seu.edu.cn), 张超越 (chaoyue_zhang@seu.edu.cn),
-            徐晓莉 (xiaolixu@seu.edu.cn), 曾勇 (yong_zeng@seu.edu.cn)</p>
-    </footer>
-
-</body>
-
-</html>
+</ul></div> </div> </section> </div>  </main> <footer class="site-footer"> <div class="container footer-inner"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p> <strong>作者:</strong>   Zhiwen Zhou (zhiwen_zhou@seu.edu.cn), Chaoyue Zhang (chaoyue_zhang@seu.edu.cn), Xiaoli Xu (xiaolixu@seu.edu.cn), Yong Zeng (yong_zeng@seu.edu.cn) </p> </div> </footer> </body></html>

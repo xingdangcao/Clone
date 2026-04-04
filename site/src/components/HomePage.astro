@@ -1,0 +1,101 @@
+---
+import { homeContent, navItems } from "../data/site.js";
+import DocsLayout from "../layouts/DocsLayout.astro";
+import ReadmeContent from "./ReadmeContent.astro";
+import SectionBlock from "./SectionBlock.astro";
+
+const { locale, readmeHtml } = Astro.props;
+const content = homeContent[locale];
+const isZh = locale === "zh";
+const layoutLang = isZh ? "zh-CN" : "en";
+const languageSwitch = isZh
+  ? { href: "index.html", label: "EN" }
+  : { href: "index_zh.html", label: "中文" };
+---
+
+<DocsLayout
+  title={content.title}
+  description={content.description}
+  lang={layoutLang}
+  pageKey="home"
+  navItems={navItems[locale]}
+  langSwitch={languageSwitch}
+>
+  <div class="container page-stack">
+    <section class="home-hero animate">
+      <img src="images/logo_main.svg" alt="OpenISAC" class="home-hero-logo" />
+      <p>{content.hero.tagline}</p>
+      <a href={content.hero.ctaHref} class="hero-action">{content.hero.ctaLabel}</a>
+    </section>
+
+    <SectionBlock id="about" title={content.about.title} className="section-prose">
+      <div class="generated-prose" set:html={content.about.html}></div>
+    </SectionBlock>
+
+    <SectionBlock id="affiliation" title={content.affiliation.title} className="section-community">
+      <div class="generated-prose" set:html={content.affiliation.html}></div>
+    </SectionBlock>
+
+    <SectionBlock id="community" title={content.community.title} className="section-community">
+      <div class="community-card">
+        <ul class="link-list">
+          {content.community.links.map((item) => (
+            <li>
+              <a href={item.href} target="_blank" rel="noreferrer noopener">
+                {item.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+        <div class="wechat-block">
+          <p>{content.community.wechatLabel}</p>
+          <img src="images/WeChat.jpg" alt={content.community.wechatAlt} />
+        </div>
+      </div>
+    </SectionBlock>
+
+    <SectionBlock id="scope" title={content.scope.title} className="section-prose">
+      <div class="generated-prose" set:html={content.scope.html}></div>
+    </SectionBlock>
+
+    <SectionBlock id="sensing-demo" title={content.sensingDemo.title} className="section-demo">
+      <div class="showcase-grid">
+        {content.sensingDemo.items.map((item) => (
+          <article class="media-card">
+            <div class="video-frame">
+              <video controls muted loop playsinline preload="metadata">
+                <source src={item.videoUrl} type="video/mp4" />
+                {isZh ? "您的浏览器不支持 video 标签。" : "Your browser does not support the video tag."}
+              </video>
+            </div>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </article>
+        ))}
+      </div>
+    </SectionBlock>
+
+    <SectionBlock id="comm-demo" title={content.commDemo.title} className="section-demo">
+      <div class="showcase-grid showcase-grid-single">
+        {content.commDemo.items.map((item) => (
+          <article class="media-card">
+            <div class="video-frame">
+              <video controls muted loop playsinline preload="metadata">
+                <source src={item.videoUrl} type="video/mp4" />
+                {isZh ? "您的浏览器不支持 video 标签。" : "Your browser does not support the video tag."}
+              </video>
+            </div>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </article>
+        ))}
+      </div>
+    </SectionBlock>
+
+    <section id="hardware" class="section-block animate section-guide">
+      <div class="section-body">
+        <ReadmeContent html={readmeHtml} />
+      </div>
+    </section>
+  </div>
+</DocsLayout>
