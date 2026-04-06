@@ -17,6 +17,7 @@ const content = isZh
       stats: [
         {
           value: "≥100 MHz",
+          marker: "*",
           label: "实时带宽能力",
           detail: "面向高吞吐 OTA 实验与实时无线链路验证。",
         },
@@ -31,6 +32,7 @@ const content = isZh
           detail: "双站实验无需依赖有线同步链路。",
         },
       ],
+      heroFootnote: "* 在 i7 10700 + USRP X310 平台上已完成通信以及单站、双站感知验证。",
       actions: [
         { href: "documentation_zh.html", label: "进入文档中心", kind: "primary" },
         { href: "architecture_zh.html", label: "查看系统架构", kind: "secondary" },
@@ -55,10 +57,34 @@ const content = isZh
           },
         ],
       },
+      scope: {
+        kicker: "What it is, and what it is not",
+        title: "OpenISAC 的定位",
+        lead:
+          "适合面向真实空口实验的通信感知研究，但并不以标准兼容或完整协议栈为目标。",
+        cards: [
+          {
+            title: "OpenISAC 是什么？",
+            body: "一个基于 OFDM 的通信与感知一体化平台，适合学术实验、原型验证和快速算法迭代。",
+          },
+          {
+            title: "OpenISAC 不是什么？",
+            body: "不是 Wi-Fi 或 5G NR 等标准兼容实现，也不是 openwifi、OpenAirInterface 这类全栈系统的替代品。",
+          },
+          {
+            title: "何时使用它",
+            body: "适合快速验证新的 OFDM/ISAC 算法，或将同步、感知、PHY 思路尽快跑到真实 OTA 实验中。",
+          },
+          {
+            title: "何时不使用它",
+            body: "如果目标是互操作性、完整 MAC/协议栈行为，或标准合规与生产级部署，就不适合使用它。",
+          },
+        ],
+      },
       docs: {
         kicker: "Documentation",
-        title: "按工作流组织的文档入口",
-        lead: "安装部署、系统架构、信号处理说明和完整参考手册统一整理在文档中心，方便按任务快速进入。",
+        title: "安装、架构、信号处理与参考手册",
+        lead: "查看安装部署说明、系统架构、信号处理细节，以及完整参考手册。",
         cards: [
           {
             tag: "快速开始",
@@ -139,6 +165,7 @@ const content = isZh
       stats: [
         {
           value: "≥100 MHz",
+          marker: "*",
           label: "Real-time bandwidth",
           detail: "For high-throughput OTA experiments and real-time radio validation.",
         },
@@ -153,6 +180,7 @@ const content = isZh
           detail: "Run bistatic experiments without depending on wired synchronization links.",
         },
       ],
+      heroFootnote: "* Validated for communication plus monostatic and bistatic sensing on an i7 10700 + USRP X310 platform.",
       actions: [
         { href: "documentation.html", label: "Open Documentation", kind: "primary" },
         { href: "architecture.html", label: "See System Architecture", kind: "secondary" },
@@ -177,11 +205,35 @@ const content = isZh
           },
         ],
       },
+      scope: {
+        kicker: "What it is, and what it is not",
+        title: "Platform positioning",
+        lead:
+          "Built for real OTA ISAC research and rapid PHY iteration, not for standards compliance or full-stack interoperability.",
+        cards: [
+          {
+            title: "What OpenISAC is",
+            body: "A minimal OFDM-based communication and sensing platform for academic experiments, prototyping, and rapid algorithm validation.",
+          },
+          {
+            title: "What OpenISAC is not",
+            body: "Not a Wi-Fi or 5G NR compliant implementation, and not a replacement for full-stack systems such as openwifi or OpenAirInterface.",
+          },
+          {
+            title: "When to use it",
+            body: "Use it when you need to validate OFDM/ISAC ideas quickly and move synchronization, sensing, or PHY concepts into real OTA experiments.",
+          },
+          {
+            title: "When not to use it",
+            body: "Do not use it when your primary goal is interoperability, full MAC behavior, standards compliance, or production deployment.",
+          },
+        ],
+      },
       docs: {
         kicker: "Documentation",
-        title: "Documentation organized by workflow",
+        title: "Installation, architecture, signal processing, and reference",
         lead:
-          "Setup, architecture, signal-processing notes, and the full reference manual are organized into a dedicated documentation entry.",
+          "Browse setup guidance, system architecture, signal-processing details, and the full reference manual.",
         cards: [
           {
             tag: "Getting Started",
@@ -276,7 +328,10 @@ const content = isZh
           <div class="hero-stats">
             {content.stats.map((item) => (
               <div class="stat-card">
-                <span class="stat-value">{item.value}</span>
+                <span class="stat-value">
+                  {item.value}
+                  {item.marker && <sup class="stat-marker">{item.marker}</sup>}
+                </span>
                 <div class="stat-label">{item.label}</div>
                 <div class="stat-detail">{item.detail}</div>
               </div>
@@ -289,6 +344,7 @@ const content = isZh
               </a>
             ))}
           </div>
+          <p class="hero-footnote">{content.heroFootnote}</p>
         </div>
       </div>
     </div>
@@ -302,6 +358,20 @@ const content = isZh
       <div class="feature-grid">
         {content.overview.cards.map((card) => (
           <div class="feature-card">
+            <h3>{card.title}</h3>
+            <p>{card.body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section id="scope">
+      <p class="section-kicker">{content.scope.kicker}</p>
+      <h2>{content.scope.title}</h2>
+      <p class="section-lead">{content.scope.lead}</p>
+      <div class="docs-grid">
+        {content.scope.cards.map((card) => (
+          <div class="docs-card">
             <h3>{card.title}</h3>
             <p>{card.body}</p>
           </div>

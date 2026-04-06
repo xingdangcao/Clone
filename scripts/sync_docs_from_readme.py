@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Sync documentation hub reference sections from README*.md.
-
-Managed range:
-- English: from "## Hardware Setup"
-- Chinese: from "## 硬件准备"
-"""
+"""Sync README reference sections into Astro-generated data."""
 
 from __future__ import annotations
 
@@ -12,29 +7,25 @@ import json
 import re
 from html import unescape
 from pathlib import Path
+from typing import Any
 
 from markdown_it import MarkdownIt
 
 
 ROOT = Path(__file__).resolve().parents[1]
+GENERATED_JSON = ROOT / "site" / "src" / "generated" / "readme_sections.json"
 
 
 SYNC_JOBS = (
     {
+        "locale": "en",
         "readme": ROOT / "README.md",
         "start_heading": "## Hardware Setup",
-        "html": ROOT / "docs" / "documentation.html",
-        "section_id": "reference-manual",
-        "range_start": "<!-- README_SYNC_START -->",
-        "range_end": "<!-- README_SYNC_END -->",
     },
     {
+        "locale": "zh",
         "readme": ROOT / "README_zh.md",
         "start_heading": "## 硬件准备",
-        "html": ROOT / "docs" / "documentation_zh.html",
-        "section_id": "reference-manual",
-        "range_start": "<!-- README_SYNC_START -->",
-        "range_end": "<!-- README_SYNC_END -->",
     },
 )
 
@@ -48,16 +39,7 @@ def _extract_markdown_section(md_text: str, start_heading: str) -> str:
             break
     if start_idx < 0:
         raise ValueError(f"Heading not found: {start_heading}")
-
-    section = "\n".join(lines[start_idx:]).strip() + "\n"
-    return section
-
-
-def _render_markdown_to_html(md_text: str) -> str:
-    md = MarkdownIt("commonmark", {"html": False})
-    md.enable("table")
-    rendered = md.render(md_text).strip()
-    return _add_heading_ids(rendered)
+    return "\n".join(lines[start_idx:]).strip() + "\n"
 
 
 def _slugify_heading(heading_html: str) -> str:
@@ -83,89 +65,49 @@ def _add_heading_ids(rendered_html: str) -> str:
     return re.sub(r"<h([2-4])>(.*?)</h\1>", repl, rendered_html)
 
 
-def _replace_managed_range(
-    html_text: str,
-    section_id: str,
-    range_start: str,
-    range_end: str,
-    rendered_html: str,
-) -> str:
-    managed_block = (
-        f"{range_start}\n"
-        f'<section id="{section_id}">\n'
-        "<!-- AUTO-GENERATED FROM README: DO NOT EDIT THIS SECTION DIRECTLY -->\n"
-        f"{rendered_html}\n"
-        "</section>\n"
-        f"{range_end}"
-    )
-
-    start_idx = html_text.find(range_start)
-    end_idx = html_text.find(range_end)
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        end_idx = end_idx + len(range_end)
-        return html_text[:start_idx] + managed_block + html_text[end_idx:]
-
-    # Fallback for first migration: replace from <section id="hardware"> to </main>
-    section_marker = f'<section id="{section_id}">'
-    s_idx = html_text.find(section_marker)
-    if s_idx == -1:
-        raise ValueError(f'Section id="{section_id}" not found in HTML')
-    main_end = html_text.find("</main>", s_idx)
-    if main_end == -1:
-        raise ValueError("Closing </main> not found in HTML")
-    return html_text[:s_idx] + managed_block + "\n\n    " + html_text[main_end:]
+def _render_markdown_to_html(md_text: str) -> str:
+    md = MarkdownIt("commonmark", {"html": False})
+    md.enable("table")
+    rendered = md.render(md_text).strip()
+    return _add_heading_ids(rendered)
 
 
-def sync_once(
-    readme_path: Path,
-    start_heading: str,
-    html_path: Path,
-    section_id: str,
-    range_start: str,
-    range_end: str,
-) -> str:
-    md_text = readme_path.read_text(encoding="utf-8")
-    section_md = _extract_markdown_section(md_text, start_heading)
-    rendered = _render_markdown_to_html(section_md)
-
-    html_text = html_path.read_text(encoding="utf-8")
-    updated_html = _replace_managed_range(
-        html_text=html_text,
-        section_id=section_id,
-        range_start=range_start,
-        range_end=range_end,
-        rendered_html=rendered,
-    )
-    html_path.write_text(updated_html, encoding="utf-8")
-    return rendered
+def _extract_heading_outline(rendered_html: str) -> list[dict[str, Any]]:
+    outline: list[dict[str, Any]] = []
+    for match in re.finditer(r'<h([2-4]) id="([^"]+)">(.*?)</h\1>', rendered_html):
+        level = int(match.group(1))
+        heading_id = match.group(2)
+        title = unescape(re.sub(r"<[^>]+>", "", match.group(3))).strip()
+        outline.append({"level": level, "id": heading_id, "title": title})
+    return outline
 
 
-def sync_generated_json(readme_sections: dict[str, dict[str, str]]) -> None:
-    generated_path = ROOT / "site" / "src" / "generated" / "readme_sections.json"
-    generated_path.parent.mkdir(parents=True, exist_ok=True)
-    generated_path.write_text(
-        json.dumps(readme_sections, ensure_ascii=False, indent=2) + "\n",
+def _build_generated_payload() -> dict[str, dict[str, Any]]:
+    payload: dict[str, dict[str, Any]] = {}
+    for job in SYNC_JOBS:
+        md_text = Path(job["readme"]).read_text(encoding="utf-8")
+        section_md = _extract_markdown_section(md_text, job["start_heading"])
+        rendered_html = _render_markdown_to_html(section_md)
+        payload[job["locale"]] = {
+            "start_heading": job["start_heading"],
+            "html": rendered_html,
+            "outline": _extract_heading_outline(rendered_html),
+        }
+    return payload
+
+
+def _write_generated_json(payload: dict[str, dict[str, Any]]) -> None:
+    GENERATED_JSON.parent.mkdir(parents=True, exist_ok=True)
+    GENERATED_JSON.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
 
 def main() -> None:
-    generated: dict[str, dict[str, str]] = {}
-    for locale, job in zip(("en", "zh"), SYNC_JOBS):
-        rendered = sync_once(
-            readme_path=job["readme"],
-            start_heading=job["start_heading"],
-            html_path=job["html"],
-            section_id=job["section_id"],
-            range_start=job["range_start"],
-            range_end=job["range_end"],
-        )
-        generated[locale] = {
-            "start_heading": job["start_heading"],
-            "html": rendered,
-        }
-    sync_generated_json(generated)
-    print("Synced documentation reference sections from README.")
+    payload = _build_generated_payload()
+    _write_generated_json(payload)
+    print("Synced Astro generated data from README.")
 
 
 if __name__ == "__main__":

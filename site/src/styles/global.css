@@ -324,6 +324,12 @@ nav {
   line-height: 1;
 }
 
+.stat-marker {
+  margin-left: 0.15em;
+  font-size: 0.58em;
+  vertical-align: top;
+}
+
 .stat-label {
   font-size: 0.98rem;
   font-weight: 600;
@@ -333,6 +339,15 @@ nav {
   margin-top: 0.35rem;
   font-size: 0.92rem;
   color: rgba(226, 232, 240, 0.82);
+}
+
+.hero-footnote {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0.85rem auto 0;
+  color: rgba(226, 232, 240, 0.84);
+  font-size: 0.93rem;
+  text-align: left;
 }
 
 main {
