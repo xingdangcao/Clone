@@ -428,12 +428,22 @@ ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-p
 ```
 *If you are streaming locally, your IP of the BS can be set to 127.0.0.1.*
 
+If you want to stream audio together with the video, use RTP MPEG-TS instead:
+```bash
+ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts "rtp://<your IP of the BS>:50000"
+```
+
 ### 4. Play video from the UE
 Copy `video.sdp` to the video receiver, modify `m=video 50000 RTP/AVP 96` to `m=video 50001 RTP/AVP 96`.
 ```bash
 ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 ```
 *Note that this command should be run on the frontend.*
+
+For the RTP MPEG-TS stream with audio, you can play it directly without an SDP file:
+```bash
+ffplay rtp://0.0.0.0:50001
+```
 
 ### 5. Run monostatic frontend
 ```bash

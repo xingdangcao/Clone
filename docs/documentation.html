@@ -255,11 +255,17 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <pre><code class="language-bash">ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 3000k -minrate 3000k -maxrate 3000k -bufsize 1M -f rtp -sdp_file video.sdp &quot;rtp://&lt;your IP of the BS&gt;:50000&quot;
 </code></pre>
 <p><em>If you are streaming locally, your IP of the BS can be set to 127.0.0.1.</em></p>
+<p>If you want to stream audio together with the video, use RTP MPEG-TS instead:</p>
+<pre><code class="language-bash">ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts &quot;rtp://&lt;your IP of the BS&gt;:50000&quot;
+</code></pre>
 <h3 id="4-play-video-from-the-ue">4. Play video from the UE</h3>
 <p>Copy <code>video.sdp</code> to the video receiver, modify <code>m=video 50000 RTP/AVP 96</code> to <code>m=video 50001 RTP/AVP 96</code>.</p>
 <pre><code class="language-bash">ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 </code></pre>
 <p><em>Note that this command should be run on the frontend.</em></p>
+<p>For the RTP MPEG-TS stream with audio, you can play it directly without an SDP file:</p>
+<pre><code class="language-bash">ffplay rtp://0.0.0.0:50001
+</code></pre>
 <h3 id="5-run-monostatic-frontend">5. Run monostatic frontend</h3>
 <pre><code class="language-bash">python3 ./scripts/plot_sensing.py
 </code></pre>

@@ -428,12 +428,22 @@ ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-p
 ```
 *如果您在BS本地传输视频流，BS 的 IP 可以设置为 127.0.0.1。*
 
+如果您希望连同音频一起传输，可以改用 RTP MPEG-TS：
+```bash
+ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts "rtp://<your IP of the BS>:50000"
+```
+
 ### 4. 从 UE 播放视频
 将 `video.sdp` 复制到视频接收端，将 `m=video 50000 RTP/AVP 96` 修改为 `m=video 50001 RTP/AVP 96`。
 ```bash
 ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 ```
 *注意：此命令应在前端运行。*
+
+对于带音频的 RTP MPEG-TS 流，则可以不依赖 SDP 文件，直接播放：
+```bash
+ffplay rtp://0.0.0.0:50001
+```
 
 ### 5. 运行单站感知前端
 ```bash
