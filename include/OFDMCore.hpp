@@ -213,6 +213,89 @@ private:
 };
 
 /**
+ * @brief Fixed block bit interleaver for LDPC-coded QPSK payloads.
+ *
+ * The permutation is a row/column matrix transpose applied independently to
+ * each coded block. For the default LDPC(1008,504) path, a 21 x 48 layout
+ * keeps one dimension friendly to wide SIMD gathers on the CPU.
+ */
+class BitBlockInterleaver {
+public:
+    BitBlockInterleaver(size_t block_size, size_t rows)
+        : _block_size(block_size),
+          _rows(rows),
+          _cols((rows > 0 && (block_size % rows) == 0) ? (block_size / rows) : 0),
+          _interleave_map(block_size),
+          _deinterleave_map(block_size)
+    {
+        if (_block_size == 0 || _rows == 0 || _cols == 0) {
+            throw std::runtime_error("BitBlockInterleaver requires block_size divisible by rows.");
+        }
+
+        for (size_t row = 0; row < _rows; ++row) {
+            for (size_t col = 0; col < _cols; ++col) {
+                const size_t src = row * _cols + col;
+                const size_t dst = col * _rows + row;
+                _interleave_map[dst] = static_cast<uint16_t>(src);
+                _deinterleave_map[src] = static_cast<uint16_t>(dst);
+            }
+        }
+    }
+
+    size_t block_size() const { return _block_size; }
+
+    template<typename T, typename Alloc>
+    void interleave_inplace(
+        std::vector<T, Alloc>& values,
+        std::vector<T, Alloc>& scratch
+    ) const {
+        apply_map_inplace(values, _interleave_map, scratch);
+    }
+
+    template<typename T, typename Alloc>
+    void deinterleave_inplace(
+        std::vector<T, Alloc>& values,
+        std::vector<T, Alloc>& scratch
+    ) const {
+        apply_map_inplace(values, _deinterleave_map, scratch);
+    }
+
+private:
+    template<typename T, typename Alloc>
+    void apply_map_inplace(
+        std::vector<T, Alloc>& values,
+        const std::vector<uint16_t>& map,
+        std::vector<T, Alloc>& scratch
+    ) const {
+        if (values.empty()) {
+            return;
+        }
+        if ((values.size() % _block_size) != 0) {
+            throw std::runtime_error("BitBlockInterleaver input size must be a multiple of block_size.");
+        }
+
+        scratch.resize(_block_size);
+        T* const scratch_ptr = scratch.data();
+        T* const values_ptr = values.data();
+        const size_t block_count = values.size() / _block_size;
+        for (size_t block = 0; block < block_count; ++block) {
+            const T* const block_ptr = values_ptr + block * _block_size;
+            #pragma omp simd simdlen(16)
+            for (size_t i = 0; i < _block_size; ++i) {
+                scratch_ptr[i] = block_ptr[map[i]];
+            }
+            std::memcpy(values_ptr + block * _block_size, scratch_ptr, _block_size * sizeof(T));
+        }
+    }
+
+    size_t _block_size = 0;
+    size_t _rows = 0;
+    size_t _cols = 0;
+    std::vector<uint16_t> _interleave_map;
+    std::vector<uint16_t> _deinterleave_map;
+};
+
+/**
  * @brief QPSK Modulator/Demodulator.
  * 
  * Provides QPSK modulation and demodulation operations using a pre-computed

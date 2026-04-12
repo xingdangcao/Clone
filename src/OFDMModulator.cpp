@@ -166,6 +166,7 @@ public:
         _measurement_tx_gain_x10.store(
             static_cast<int32_t>(std::llround(cfg.tx_gain * 10.0)),
             std::memory_order_relaxed);
+        _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
         if (_measurement_enabled && !_cfg.measurement_output_dir.empty()) {
             _measurement_summary_path =
                 (_cfg.measurement_output_dir.empty()
@@ -354,6 +355,8 @@ private:
     
     // LDPC encoding and scrambling
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
+    std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
+    LDPCCodec::AlignedIntVector _interleaver_bits_scratch;
     Scrambler scrambler{201600, 0x5A};
     
     // MTI Filter
@@ -957,6 +960,7 @@ private:
         LDPCCodec::AlignedIntVector header_coded_bits;
         _ldpc.encode_frame(header_bytes, header_coded_bits);
         scrambler.scramble(header_coded_bits);
+        _bit_interleaver->interleave_inplace(header_coded_bits, _interleaver_bits_scratch);
         LDPCCodec::AlignedIntVector header_qpsk_ints;
         LDPCCodec::pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
         prof_step_end = ProfileClock::now();
@@ -972,6 +976,7 @@ private:
         LDPCCodec::AlignedIntVector encoded_bits_all;
         _ldpc.encode_frame(input_bytes, encoded_bits_all);
         scrambler.scramble(encoded_bits_all);
+        _bit_interleaver->interleave_inplace(encoded_bits_all, _interleaver_bits_scratch);
         LDPCCodec::AlignedIntVector qpsk_ints_all;
         LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all);
         prof_step_end = ProfileClock::now();
@@ -1016,8 +1021,8 @@ private:
      * On packet receipt:
      * 1. Constructs a protocol header.
      * 2. Performs LDPC encoding on the header and payload.
-     * 3. Scrambles the encoded bits.
-     * 4. Maps bits to QPSK symbols.
+     * 3. Scrambles and interleaves the encoded bits.
+     * 4. Maps interleaved bits to QPSK symbols.
      * 5. Pushes ready-to-modulate packets to the data buffer.
      */
     void _data_ingest_proc() {

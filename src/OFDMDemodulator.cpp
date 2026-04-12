@@ -153,6 +153,7 @@ public:
           _sync_search_gain_sweep(cfg),
           _reset_hold_frames(reset_hold_frames_from_cfg(cfg)),
           _akf(make_akf_params(cfg), frame_duration_from_cfg(cfg)) {
+        _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc_decoder.get_N(), 21);
         _measurement_active_epoch_id.store(0, std::memory_order_relaxed);
         if (_measurement_enabled && !cfg_.measurement_output_dir.empty()) {
             _measurement_summary_path = cfg_.measurement_output_dir + "/demodulator_measurement_summary.csv";
@@ -363,6 +364,8 @@ private:
     LatencyAccumulator _latency_accumulator;
     
     LDPCCodec _ldpc_decoder{make_ldpc_5041008_cfg()};
+    std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
+    LDPCCodec::AlignedFloatVector _deinterleaver_llr_scratch;
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_output_sender;
 
@@ -1840,7 +1843,8 @@ private:
                          frame_llr.llr.begin() + llr_offset + bits_per_block,
                          header_llr.begin());
                 
-                // 2. Soft descramble LDPC header
+                // 2. Deinterleave and soft descramble the LDPC header
+                _bit_interleaver->deinterleave_inplace(header_llr, _deinterleaver_llr_scratch);
                 _descrambler.soft_descramble(header_llr);
                 
                 // 3. LDPC soft decode
@@ -1908,7 +1912,8 @@ private:
                                  frame_llr.llr.begin() + llr_offset + required_llr,
                                  payload_llr.begin());
                         
-                        // 9. Soft descramble payload data
+                        // 9. Deinterleave and soft descramble payload data
+                        _bit_interleaver->deinterleave_inplace(payload_llr, _deinterleaver_llr_scratch);
                         _descrambler.soft_descramble(payload_llr);
                         
                         // 10. LDPC soft decode payload data
