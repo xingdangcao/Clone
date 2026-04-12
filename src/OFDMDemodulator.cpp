@@ -829,7 +829,6 @@ private:
         current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.rx_channel);
 
     }
-
     void prepare_fftw() {
         fft_input_.resize(cfg_.fft_size);
         fft_output_.resize(cfg_.fft_size);
@@ -1097,26 +1096,42 @@ private:
                 
                 LOG_RT_INFO() << "CFO estimate: " << cfo << " Hz (using " << available_symbols
                               << " symbols)";
+
+                const int frame_start_offset_samples = max_pos - static_cast<int>(cfg_.sync_pos * symbol_len);
+                const int64_t detected_frame_time_ns =
+                    sync_time_ns +
+                    static_cast<int64_t>(std::llround(
+                        static_cast<double>(frame_start_offset_samples) * 1.0e9 / cfg_.sample_rate));
+                const int predictive_delay_samples =
+                    _predictive_delay_samples_from_cfo(
+                        cfg_,
+                        detected_frame_time_ns,
+                        cfo,
+                        current_rx_tune_.actual_rf_freq,
+                        current_rx_tune_.actual_dsp_freq,
+                        time_spec_to_ns(usrp_->get_time_now()));
                 
                 // Perform initial CFO correction
                 if (cfg_.software_sync && allow_freq_adjust){
                     adjust_rx_freq(-cfo, false);
                     issued_freq_adjust = true;
                 }
+
+                // Record time offset
+                if (allow_alignment) {
+                    sync_offset_ =
+                        (max_pos - cfg_.sync_pos * symbol_len - cfg_.desired_peak_pos +
+                         predictive_delay_samples);
+                    if (sync_offset_ > 0) {
+                        sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
+                    }
+                    _clear_frame_queue();
+                    discard_samples_.store(sync_offset_);
+                    state_ = RxState::ALIGNMENT;
+                    issued_alignment = true;
+                }
             } else {
                 LOG_RT_WARN() << "No valid symbols for CFO estimation";
-            }
-            
-            // Record time offset
-            if (allow_alignment) {
-                sync_offset_ = (max_pos - cfg_.sync_pos * symbol_len);
-                if (sync_offset_ > 0) {
-                    sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
-                }
-                _clear_frame_queue();
-                discard_samples_.store(sync_offset_);
-                state_ = RxState::ALIGNMENT;
-                issued_alignment = true;
             }
             if (issued_freq_adjust) {
                 _control_time_gates.mark_freq_adjust_now(usrp_->get_time_now());
@@ -1542,7 +1557,16 @@ private:
             sync_symbol_td_count = sync_symbol_len;
         }
         auto delay_offset = sfo_estimator.get_sensing_delay_offset();
-        int delay_index_err = adjusted_index - cfg_.desired_peak_pos;
+        const int predictive_delay_samples =
+            _predictive_delay_samples_from_cfo(
+                cfg_,
+                frame.usrp_time_ns,
+                detected_freq_offset,
+                current_rx_tune_.actual_rf_freq,
+                current_rx_tune_.actual_dsp_freq,
+                time_spec_to_ns(usrp_->get_time_now()));
+        int delay_index_err =
+            adjusted_index - cfg_.desired_peak_pos + predictive_delay_samples;
         if (allow_rx_gain_adjust) {
             RxAgcAdjustment agc_adjustment;
             issued_rx_gain_adjust = _rx_agc.maybe_apply_from_delay_peak(
@@ -1603,7 +1627,6 @@ private:
         }
         if(abs(delay_index_err) >= cfg_.delay_adjust_step &&
             abs(delay_index_err) < cfg_.cp_length  &&
-            abs(detected_freq_offset) < 100.0f &&
             ( cfg_.software_sync || cfg_.hardware_sync ) &&
             !_sync_in_progress &&
             allow_alignment)

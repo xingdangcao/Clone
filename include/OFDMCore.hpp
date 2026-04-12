@@ -68,6 +68,52 @@ inline double rx_tune_system_cfo_hz(double target_tx_center_freq_hz,
 }
 
 /**
+ * @brief Predict delay correction in samples from observed CFO and elapsed frame time.
+ */
+inline int _predictive_delay_samples_from_cfo(const Config& cfg,
+                                              int64_t source_frame_time_ns,
+                                              double detected_freq_offset_hz,
+                                              double actual_rx_rf_freq_hz,
+                                              double actual_rx_dsp_freq_hz,
+                                              int64_t now_ns) {
+    if (source_frame_time_ns < 0 || !std::isfinite(detected_freq_offset_hz) ||
+        cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0 ||
+        std::abs(cfg.center_freq) <= 0.0) {
+        return 0;
+    }
+
+    const double tune_system_cfo_hz = rx_tune_system_cfo_hz(
+        cfg.center_freq,
+        actual_rx_rf_freq_hz,
+        actual_rx_dsp_freq_hz
+    );
+    const double clock_error_hz = detected_freq_offset_hz - tune_system_cfo_hz;
+    const double clock_error_ratio = clock_error_hz / cfg.center_freq;
+    const double predicted_samples_per_frame =
+        clock_error_ratio * static_cast<double>(cfg.samples_per_frame());
+    if (!std::isfinite(predicted_samples_per_frame) ||
+        std::abs(predicted_samples_per_frame) < 1e-6) {
+        return 0;
+    }
+
+    const double frame_duration_ns = frame_duration_from_cfg(cfg) * 1.0e9;
+    if (!(frame_duration_ns > 0.0)) {
+        return 0;
+    }
+
+    const double frame_gap_real =
+        (static_cast<double>(now_ns) - static_cast<double>(source_frame_time_ns)) /
+        frame_duration_ns;
+    const int64_t frame_gap = std::max<int64_t>(
+        1,
+        static_cast<int64_t>(std::floor(frame_gap_real)) + 1
+    );
+
+    return static_cast<int>(std::llround(
+        -predicted_samples_per_frame * static_cast<double>(frame_gap)));
+}
+
+/**
  * @brief Generate frequency-domain Zadoff-Chu sequence.
  */
 inline AlignedVector generate_zc_freq(size_t fft_size, int zc_root) {
@@ -587,7 +633,7 @@ public:
         
         #pragma omp simd simdlen(16)
         for (size_t i = 0; i < _fft_size; ++i) {
-            if (i < cp_length) {
+            if (i < cp_length || i >= (_fft_size - cp_length)) {
                 _scratch_buf2[i] *= w_pass;
             } else {
                 _scratch_buf2[i] = {0.0f, 0.0f};
