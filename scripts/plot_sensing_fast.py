@@ -3341,9 +3341,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OpenISAC Sensing - PyQtGraph (Multi-Channel)")
-        self.resize(1600, 900)
-        self._control_panel_width = 520
-        self._status_label_text_width = self._control_panel_width - 24
+        self.resize(1600, self._fit_height_to_screen(900))
+        self._control_panel_base_width = self._scale_px(720)
+        self._control_panel_min_width = self._scale_px(560)
+        self._control_panel_max_width = self._scale_px(860)
+        self._control_panel_width = self._control_panel_base_width
+        self._status_label_text_width = self._control_panel_width - self._scale_px(24)
 
         self.phase_ready = False
         self.synced_frame_id = None
@@ -3377,7 +3380,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rd_doppler_span = 1.0
         self.targets_window = QtWidgets.QWidget()
         self.targets_window.setWindowTitle("OpenISAC Top Targets")
-        self.targets_window.resize(820, 860)
+        self.targets_window.resize(820, self._fit_height_to_screen(860))
         targets_layout = QtWidgets.QVBoxLayout(self.targets_window)
         self.target_sector_plot = pg.PlotWidget(title="Target Sector View")
         self.target_sector_plot.setLabel('left', 'Forward Range (bin)')
@@ -3428,8 +3431,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Plot Area
         plot_widget = QtWidgets.QWidget()
+        plot_widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         plot_layout = QtWidgets.QVBoxLayout(plot_widget)
-        main_layout.addWidget(plot_widget, stretch=4)
+        main_layout.addWidget(plot_widget, stretch=1)
 
         # Range-Doppler Plot
         self.rd_plot = pg.PlotWidget(title="Range-Doppler Spectrum")
@@ -3485,12 +3489,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         plot_layout.addWidget(self.phase_curve_plot)
 
-        # Control Panel
+        # Control Panel (inside a scroll area for small screens)
         control_panel = QtWidgets.QWidget()
         control_panel.setFixedWidth(self._control_panel_width)
+        self.control_panel = control_panel
         control_layout = QtWidgets.QVBoxLayout(control_panel)
         control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
-        main_layout.addWidget(control_panel, stretch=1)
+        control_scroll = QtWidgets.QScrollArea()
+        self.control_scroll = control_scroll
+        control_scroll.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        control_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        control_scroll.setWidget(control_panel)
+        main_layout.addWidget(control_scroll, stretch=0)
 
         # Status Labels
         self.lbl_display = QtWidgets.QLabel("Display: CH1")
@@ -3504,7 +3516,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_phase_clicked = QtWidgets.QLabel("Phase@Clicked: click RD map to query")
         self.lbl_aoa_status = QtWidgets.QLabel("AoA: waiting calibration/click")
 
-        for lbl in [
+        self._status_labels = [
             self.lbl_display,
             self.lbl_fps,
             self.lbl_queue,
@@ -3515,25 +3527,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_phase_sync,
             self.lbl_phase_clicked,
             self.lbl_aoa_status,
-        ]:
+        ]
+
+        for lbl in self._status_labels:
             lbl.setWordWrap(False)
             lbl.setTextFormat(QtCore.Qt.TextFormat.PlainText)
             lbl.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
             control_layout.addWidget(lbl)
 
         fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
-        for lbl in [
-            self.lbl_display,
-            self.lbl_fps,
-            self.lbl_queue,
-            self.lbl_sender,
-            self.lbl_params,
-            self.lbl_buffer,
-            self.lbl_cfar,
-            self.lbl_phase_sync,
-            self.lbl_phase_clicked,
-            self.lbl_aoa_status,
-        ]:
+        for lbl in self._status_labels:
             lbl.setFont(fixed_font)
             lbl.setFixedWidth(self._status_label_text_width)
             self._set_status_label_text(lbl, lbl.text())
@@ -3630,6 +3633,7 @@ class MainWindow(QtWidgets.QMainWindow):
         micro_doppler_db_layout.addWidget(self.txt_micro_doppler_db_max)
         micro_doppler_db_layout.addWidget(btn_micro_doppler_db)
         control_layout.addLayout(micro_doppler_db_layout)
+
         self.superres_controls = QtWidgets.QWidget()
         superres_layout = QtWidgets.QVBoxLayout(self.superres_controls)
         superres_layout.setContentsMargins(0, 0, 0, 0)
@@ -3656,6 +3660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         superres_threshold_layout.addWidget(btn_superres_apply)
         superres_layout.addLayout(superres_threshold_layout)
         control_layout.addWidget(self.superres_controls)
+
         # Micro-Doppler Toggle
         self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
         self.btn_md.setCheckable(True)
@@ -3927,6 +3932,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.local_os_cfar_controls.setVisible(local_detector_mode == LOCAL_DETECTOR_OS_CFAR)
         self.local_clean_controls.setVisible(local_detector_mode == LOCAL_DETECTOR_CLEAN)
         self.refresh_detector_controls(force=True)
+        self._apply_control_panel_width()
+
+    def _fit_height_to_screen(self, desired_height):
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return int(desired_height)
+        available_height = int(screen.availableGeometry().height())
+        # QWidget heights do not fully account for the native title bar/frame before show().
+        # Leave headroom for the initial size only; users can still maximize or drag taller.
+        frame_headroom = 48
+        return max(320, min(int(desired_height), available_height - frame_headroom))
+
+    def _scale_px(self, value):
+        # Qt widget sizes are already expressed in logical pixels under high-DPI scaling.
+        # Keep the right control panel wide enough instead of shrinking it by DPI.
+        return max(1, int(round(float(value))))
+
+    def _compute_control_panel_width(self):
+        # Prioritize control usability on small screens: reserve more width for the right panel.
+        dynamic_width = int(self.width() * 0.45)
+        return max(self._control_panel_min_width, min(self._control_panel_max_width, dynamic_width))
+
+    def _control_scroll_width(self):
+        frame_width = self.control_scroll.frameWidth() * 2
+        scrollbar_width = self.control_scroll.verticalScrollBar().sizeHint().width()
+        return self._control_panel_width + frame_width + scrollbar_width
+
+    def _apply_control_panel_width(self):
+        self._control_panel_width = self._compute_control_panel_width()
+        self._status_label_text_width = max(self._scale_px(180), self._control_panel_width - self._scale_px(24))
+        self.control_panel.setFixedWidth(self._control_panel_width)
+        self.control_scroll.setFixedWidth(self._control_scroll_width())
+        for lbl in self._status_labels:
+            lbl.setFixedWidth(self._status_label_text_width)
+            source_text = lbl.toolTip() if lbl.toolTip() else lbl.text()
+            self._set_status_label_text(lbl, source_text)
 
     def _set_status_label_text(self, label, text):
         elided = label.fontMetrics().elidedText(
@@ -3936,6 +3977,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         label.setText(elided)
         label.setToolTip(text)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_control_panel_width()
 
     def update_toggle_style(self, btn, state):
         btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
